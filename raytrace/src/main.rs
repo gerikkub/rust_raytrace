@@ -6,9 +6,9 @@ use std::path::Path;
 use std::f64::consts::{PI, FRAC_PI_3, FRAC_PI_2};
 
 #[derive(Copy, Clone)]
-struct Vec3(f64, f64, f64);
-type Point = Vec3;
-type Color = Vec3;
+pub struct Vec3(f64, f64, f64);
+pub type Point = Vec3;
+pub type Color = Vec3;
 
 impl Vec3 {
     fn add(&self, other: &Vec3) -> Vec3 {
@@ -56,6 +56,33 @@ impl Vec3 {
         let res = self.mult(1./self.len());
         res
     }
+
+    fn orthogonal(&self) -> Vec3 {
+        if self.0.abs() > 0.1 {
+            Vec3(-1.*(self.1 + self.2) / self.0, 1., 1.).unit()
+        } else if self.1.abs() > 0.1 {
+            Vec3(1., -1.*(self.0 + self.2) / self.1, 1.).unit()
+        } else if self.2.abs() > 0.1 {
+            Vec3(1., 1., -1.*(self.0 + self.1) / self.2,).unit()
+        } else {
+            // println!("Grow: {} {} {}", self.0, self.1, self.2);
+            self.unit().orthogonal()
+        }
+    }
+
+    fn basis(&self) -> (Vec3, Vec3, Vec3) {
+        let n = self.unit();
+        let bx = n.orthogonal();
+        let by = n.cross(&bx);
+        (bx, by, n)
+    }
+
+    fn change_basis(&self, b: (Vec3, Vec3, Vec3)) -> Vec3 {
+        Vec3(Vec3(b.0.0, b.0.1, b.0.2).dot(self),
+             Vec3(b.1.0, b.1.1, b.1.2).dot(self),
+             Vec3(b.2.0, b.2.1, b.2.2).dot(self)
+        )
+    }
 }
 
 fn make_color(color: (u8, u8, u8)) -> Color {
@@ -64,8 +91,14 @@ fn make_color(color: (u8, u8, u8)) -> Color {
          (color.2 as f64) / 255.)
 }
 
+fn random_vec() -> Vec3 {
+    Vec3(rand::random::<f64>() - 0.5,
+         rand::random::<f64>() - 0.5,
+         rand::random::<f64>() - 0.5).unit()
+}
+
 #[derive(Copy, Clone)]
-struct Ray {
+pub struct Ray {
     orig: Point,
     dir: Vec3,
 }
@@ -79,13 +112,10 @@ impl Ray {
     }
 }
 
+/*
 fn random_ray(orig: &Point, norm: &Vec3) -> Ray {
 
-    let mut dir = Vec3(0., 0., 0.);
-    dir = Vec3((rand::random::<f64>() * 2.) - 1.,
-               (rand::random::<f64>() * 2.) - 1.,
-               (rand::random::<f64>() * 2.) - 1.);
-    dir = dir.unit();
+    let mut dir = random_vec();
 
     let cos_theta = norm.dot(&dir);
 
@@ -98,6 +128,7 @@ fn random_ray(orig: &Point, norm: &Vec3) -> Ray {
         dir: dir
     }
 }
+*/
 
 fn reflect_ray(orig: &Point, norm: &Vec3, dir: &Vec3, fuzz: f64) -> Ray {
 
@@ -106,9 +137,7 @@ fn reflect_ray(orig: &Point, norm: &Vec3, dir: &Vec3, fuzz: f64) -> Ray {
     let dir_o  = dir.add(&dir_p);
 
     let reflect = dir_p.add(&dir_o);
-    let rand_vec = Vec3(rand::random::<f64>() - 0.5,
-                        rand::random::<f64>() - 0.5,
-                        rand::random::<f64>() - 0.5).unit().mult(fuzz);
+    let rand_vec = random_vec().mult(fuzz);
 
     Ray {
         orig: *orig,
@@ -118,9 +147,7 @@ fn reflect_ray(orig: &Point, norm: &Vec3, dir: &Vec3, fuzz: f64) -> Ray {
 
 fn lambertian_ray(orig: &Point, norm: &Vec3) -> Ray {
 
-    let rand_vec = Vec3(rand::random::<f64>() - 0.5,
-                        rand::random::<f64>() - 0.5,
-                        rand::random::<f64>() - 0.5).unit();
+    let rand_vec = random_vec();
 
     Ray {
         orig: *orig,
@@ -133,7 +160,7 @@ fn mix_color(c1: &Color, c2: &Color, a: f64) -> Color {
 }
 
 #[derive(Copy, Clone)]
-enum SurfaceKind {
+pub enum SurfaceKind {
     Solid { color: Color },
     Matte { color: Color, alpha: f64},
     Reflective { scattering: f64, color: Color, alpha: f64},
@@ -164,10 +191,17 @@ fn create_viewport(px: (u32, u32), size: (f64, f64)) -> Viewport {
     }
 }
 
+enum CollisionFace {
+    Front,
+    Back,
+    Side,
+    Face(u64)
+}
+
 pub trait CollisionObject {
-    fn intersects(&self, r: &Ray) -> Option<(f64, Point)>;
-    fn normal(&self, p: &Point) -> Vec3;
-    fn getsurface(&self) -> SurfaceKind;
+    fn intersects(&self, r: &Ray) -> Option<(f64, Point, CollisionFace)>;
+    fn normal(&self, p: &Point, f: &CollisionFace) -> Vec3;
+    fn getsurface(&self, f: &CollisionFace) -> SurfaceKind;
     fn getid(&self) -> u64;
 }
 
@@ -179,7 +213,7 @@ struct Sphere {
 }
 
 impl CollisionObject for Sphere {
-    fn intersects(&self, r: &Ray) -> Option<(f64, Point)> {
+    fn intersects(&self, r: &Ray) -> Option<(f64, Point, CollisionFace)> {
         let a = r.dir.dot(&r.dir);
         let cp_v = r.orig.sub(&self.orig);
         let b = r.dir.mult(2.).dot(&cp_v);
@@ -201,18 +235,23 @@ impl CollisionObject for Sphere {
                         else { tm };
                 
                 let point = r.at(t);
-                let dist = self.orig.sub(&point).len2();
-                Some((t, point))
+                Some((t, point, CollisionFace::Front))
             }
         }
     }
 
-    fn normal(&self, p: &Point) -> Vec3 {
-        p.sub(&self.orig).unit()
+    fn normal(&self, p: &Point, f: &CollisionFace) -> Vec3 {
+        match f {
+            CollisionFace::Front => p.sub(&self.orig).unit(),
+            _ => panic!("Invalid face for Sphere")
+        }
     }
 
-    fn getsurface(&self) -> SurfaceKind {
-        self.surface
+    fn getsurface(&self, f: &CollisionFace) -> SurfaceKind {
+        match f {
+            CollisionFace::Front => self.surface,
+            _ => panic!("Invalid face for Sphere")
+        }
     }
 
     fn getid(&self) -> u64 {
@@ -220,20 +259,185 @@ impl CollisionObject for Sphere {
     }
 }
 
+struct Disk {
+    orig: Point,
+    norm: Vec3,
+    r: f64,
+    depth: f64,
+    surface: SurfaceKind,
+    side_surface: SurfaceKind,
+    id: u64
+}
+
+impl CollisionObject for Disk {
+    fn intersects(&self, r: &Ray) -> Option<(f64, Point, CollisionFace)> {
+
+        // t = -1 * (norm * (orig - Rorig)) / (norm * Rdir)
+        let surf_front = self.orig.add(&self.norm.mult(self.depth));
+        let t_front = self.norm.dot(&surf_front.sub(&r.orig)) / self.norm.dot(&r.dir);
+        let p_front = r.at(t_front);
+
+        let surf_back = self.orig.sub(&self.norm.mult(self.depth));
+        let t_back = self.norm.dot(&surf_back.sub(&r.orig)) / self.norm.dot(&r.dir);
+        let p_back = r.at(t_back);
+
+        // Hit in negative time, ignore
+        if t_back < 0. && t_front < 0. {
+            return None;
+        }
+
+        let hit_front = p_front.sub(&surf_front).len() < self.r &&
+                        t_front >= 0.;
+        let hit_back = p_back.sub(&surf_back).len() < self.r &&
+                       t_back >= 0.;
+        let hit_face = hit_front || hit_back;
+
+        if hit_front && hit_back {
+            // Hit both faces. Choose the lowest positive face
+            if t_front < t_back {
+                Some((t_front, p_front, CollisionFace::Front))
+            } else {
+                Some((t_back, p_back, CollisionFace::Back))
+            }
+        } else {
+            // hit one or no faces. This means it could go through
+            // the edge of the disk
+
+            let n_basis = self.norm.basis();
+            // println!("Basis Vectors: ");
+            // println!(" {} {} {}", n_basis.0.0, n_basis.0.1, n_basis.0.2);
+            // println!(" {} {} {}", n_basis.1.0, n_basis.1.1, n_basis.1.2);
+            // println!(" {} {} {}", n_basis.2.0, n_basis.2.1, n_basis.2.2);
+
+            let r_n_temp = Ray {
+                orig: r.orig.sub(&self.orig).change_basis(n_basis),
+                dir: r.dir.change_basis(n_basis),
+            };
+            let r_n = Ray {
+                orig: Vec3(r_n_temp.orig.0, r_n_temp.orig.1, 0.),
+                dir: Vec3(r_n_temp.dir.0, r_n_temp.dir.1, 0.),
+            };
+
+            // println!("New Ray: ");
+            // println!(" {} {} {}", r_n.orig.0, r_n.orig.1, r_n.orig.2);
+            // println!(" {} {} {}", r_n.dir.0, r_n.dir.1, r_n.dir.2);
+
+            let a = r_n.dir.dot(&r_n.dir);
+            let b = 2. * r_n.orig.dot(&r_n.dir);
+            let c = r_n.orig.dot(&r_n.orig) - self.r*self.r;
+
+            let discriminate = b*b - 4.*a*c;
+
+            let (hit_side, hit_side_t) =
+                if discriminate >= 0. {
+                    let tp = (-1. * b + discriminate.sqrt()) / (2. * a);
+                    let tm = (-1. * b - discriminate.sqrt()) / (2. * a);
+
+                    let kp = self.orig.sub(&r.at(tp)).dot(&self.norm);
+                    let km = self.orig.sub(&r.at(tm)).dot(&self.norm);
+
+                    let valid_p = tp > 0. && kp.abs() < self.depth;
+                    let valid_m = tm > 0. && km.abs() < self.depth;
+
+                    if !valid_p && !valid_m {
+                        (false, 0.)
+                    } else if !valid_p {
+                        (true, tm)
+                    } else if !valid_m {
+                        (true, tp)
+                    } else {
+                        if tm < tp {
+                            (true, tm)
+                        } else {
+                            (true, tp)
+                        }
+                    }
+                } else {
+                    (false, 0.)
+                };
+
+            let (hit_face, hit_face_t) =
+                if hit_front {
+                    (true, t_front)
+                } else if hit_back {
+                    (true, t_back)
+                } else {
+                    (false, 0.)
+                };
+        
+            if hit_face && hit_side {
+                if hit_face_t < hit_side_t {
+                    Some((hit_face_t,
+                        r.at(hit_face_t),
+                        if hit_front { CollisionFace::Front } else { CollisionFace::Back}))
+                } else {
+                    Some((hit_side_t, r.at(hit_side_t), CollisionFace::Side))
+                }
+            } else if hit_face {
+                Some((hit_face_t,
+                        r.at(hit_face_t),
+                        if hit_front { CollisionFace::Front } else { CollisionFace::Back}))
+            } else if hit_side {
+                Some((hit_side_t, r.at(hit_side_t), CollisionFace::Side))
+            } else {
+                None
+            }
+        }
+
+        // println!("Disk at {} {} {} {}", t, p.0, p.1, p.2);
+
+        // if t > 0. {
+        //     let dist = p.sub(&self.orig).len();
+        //     // println!("Disk hit {} {}", t, dist);
+        //     if dist < self.r {
+        //         Some((t, p))
+        //     } else {
+        //         None
+        //     }
+        // } else {
+        //     None
+        // }
+    }
+
+    fn normal(&self, p: &Point, f: &CollisionFace) -> Vec3 {
+        // Note: This actually depends on the direction the ray came from
+        match f {
+            CollisionFace::Front => self.norm,
+            CollisionFace::Back => self.norm.mult(-1.),
+            CollisionFace::Side => {
+                let k = self.orig.sub(p).dot(&self.norm);
+                let p2 = p.add(&self.norm.mult(k));
+                p2.sub(&self.orig).unit()
+            },
+            _ => panic!("Invalid face for disk")
+        }
+    }
+    fn getsurface(&self, f: &CollisionFace) -> SurfaceKind {
+        match f {
+            CollisionFace::Front => self.surface,
+            CollisionFace::Back => self.surface,
+            CollisionFace::Side => self.side_surface,
+            _ => panic!("Invalid face for disk")
+        }
+    }
+    fn getid(&self) -> u64 {
+        self.id
+    }
+}
+
 struct Scene<'a> {
-    aspect: f64,
     objs: &'a Vec<Box<dyn CollisionObject>>
 }
 
-fn color_ray(r: &Ray, s: &Scene, obj: &Box<dyn CollisionObject>, point: &Point, depth: i64) -> Color {
-    match obj.getsurface() {
+fn color_ray(r: &Ray, s: &Scene, obj: &Box<dyn CollisionObject>, point: &Point, face: &CollisionFace, depth: i64) -> Color {
+    match obj.getsurface(face) {
         SurfaceKind::Solid {color} => {
             color
         },
         SurfaceKind::Matte {color, alpha} => {
             mix_color(&color,
                       &project_ray(&lambertian_ray(point,
-                                                   &obj.normal(point)),
+                                                   &obj.normal(point, face)),
                                    s,
                                    obj.getid(),
                                    depth + 1),
@@ -242,7 +446,7 @@ fn color_ray(r: &Ray, s: &Scene, obj: &Box<dyn CollisionObject>, point: &Point, 
         SurfaceKind::Reflective {scattering, color, alpha}  => {
             mix_color(&color,
                       &project_ray(&reflect_ray(point,
-                                                &obj.normal(point),
+                                                &obj.normal(point, face),
                                                 &r.dir,
                                                 scattering),
                                    s,
@@ -260,17 +464,14 @@ fn project_ray(r: &Ray, s: &Scene, ignore_objid: u64, depth: i64) -> Color {
     }
 
     let blue = Vec3(0.5, 0.7, 1.);
-    let red = Vec3(1., 0.5, 0.5);
 
-    let background = blue;
-
-    let intersections: Vec<(f64, Point, &Box<dyn CollisionObject>)> = s.objs.iter().filter_map(
+    let intersections: Vec<(f64, Point, CollisionFace, &Box<dyn CollisionObject>)> = s.objs.iter().filter_map(
         |s| {
             if ignore_objid == s.getid() {
                 None
             } else {
                 match s.intersects(&r) {
-                    Some(p) => Some((p.0, p.1 , s)),
+                    Some(p) => Some((p.0, p.1, p.2, s)),
                     None    => None
                 }
             }
@@ -283,13 +484,13 @@ fn project_ray(r: &Ray, s: &Scene, ignore_objid: u64, depth: i64) -> Color {
             blue
         }
     } else {
-        let (dist, point, obj) = intersections.iter().fold(&intersections[0],
+        let (_dist, point, face, obj) = intersections.iter().fold(&intersections[0],
             |acc, x| {
-                let (dist, _, _) = x;
-                let (acc_dist, _, _) = acc;
+                let (dist, _, _, _) = x;
+                let (acc_dist, _, _, _) = acc;
                 if dist < acc_dist { x } else { acc }
             });
-            color_ray(r, s, obj, point, depth)
+            color_ray(r, s, obj, point, &face, depth)
     }
 }
 
@@ -321,7 +522,7 @@ impl Viewport {
         for x in 0..self.height {
             for y in 0..self.width {
                 let mut acc = Vec3(0., 0., 0.);
-                for i in 0..self.samples_per_pixel {
+                for _i in 0..self.samples_per_pixel {
                     let ray_color = project_ray(&self.pixel_ray((x,y)), s, 0, 0);
                     acc = acc.add(&ray_color);
                 }
@@ -360,6 +561,20 @@ fn main() -> Result<()> {
     let width = 640;
     let height = 480;
 
+    // let n = Vec3(1., 2., 3.);
+    // let (bx, by, bz) = n.basis();
+
+    // let a = Vec3(2., 4., 6.);
+    // let a_n = a.change_basis((bx, by, bz));
+
+    // println!("bx: {} {} {}", bx.0, bx.1, bx.2);
+    // println!("by: {} {} {}", by.0, by.1, by.2);
+    // println!("bz: {} {} {}", bz.0, bz.1, bz.2);
+    // println!("bx * n: {}", bx.dot(&bz));
+    // println!("by * n: {}", by.dot(&bz));
+    // println!("bx * by: {}", bx.dot(&by));
+    // println!("a_n: {} {} {}", a_n.0, a_n.1, a_n.2);
+
     let mut data = vec![Vec3(0., 0., 0.); (width*height) as usize ];
 
     let v = create_viewport((width, height), (1., 1. * aspect));
@@ -388,18 +603,18 @@ fn main() -> Result<()> {
         },
         id: 2
     }));
-    objs.push(Box::new(Sphere {
-        orig: Vec3(0.5, 0.0, 5.8),
-        r: 0.2,
-        // surface: SurfaceKind::Solid(Vec3(1., 0., 0.)),
-        // surface: SurfaceKind::Reflective(0.1),
-        surface: SurfaceKind::Reflective {
-            scattering: 0.1,
-            color: make_color((51, 255, 165)),
-            alpha: 0.7
-        },
-        id: 3
-    }));
+    // objs.push(Box::new(Sphere {
+    //     orig: Vec3(0.5, 0.0, 5.8),
+    //     r: 0.2,
+    //     // surface: SurfaceKind::Solid(Vec3(1., 0., 0.)),
+    //     // surface: SurfaceKind::Reflective(0.1),
+    //     surface: SurfaceKind::Reflective {
+    //         scattering: 0.1,
+    //         color: make_color((51, 255, 165)),
+    //         alpha: 0.7
+    //     },
+    //     id: 3
+    // }));
     objs.push(Box::new(Sphere {
         orig: Vec3(0., -1.2, 6.2),
         r: 0.5,
@@ -407,13 +622,31 @@ fn main() -> Result<()> {
         surface: SurfaceKind::Reflective {
             scattering: 0.3,
             color: make_color((255, 87, 51)),
-            alpha: 0.7
+            alpha: 0.5
         },
         id: 4
     }));
+    objs.push(Box::new(Disk {
+        // orig: Vec3(0.5, 0., 7.),
+        // norm: Vec3(-1., 0., -1.).unit(),
+        orig: Vec3(0., 1.0, 6.),
+        norm: Vec3(1., 0., -0.2).unit(),
+        r: 0.4,
+        depth: 1.0,
+        surface: SurfaceKind::Matte {
+            color: make_color((200, 60, 90)),
+            alpha: 0.5
+        },
+        side_surface: SurfaceKind::Reflective {
+            scattering: 0.001,
+            color: make_color((200, 60, 90)),
+            alpha: 0.9
+        },
+        id: 5
+    }));
+
 
     let s = Scene {
-        aspect: aspect,
         objs: &objs
     };
 
