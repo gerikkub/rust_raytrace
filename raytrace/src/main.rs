@@ -166,31 +166,6 @@ pub enum SurfaceKind {
     Reflective { scattering: f64, color: Color, alpha: f64},
 }
 
-struct Viewport {
-    width: u32,
-    height: u32,
-
-    orig: Point,
-    cam: Point,
-    
-    vu: Vec3,
-    vv: Vec3,
-
-    samples_per_pixel: u32
-}
-
-fn create_viewport(px: (u32, u32), size: (f64, f64)) -> Viewport {
-    Viewport {
-        width: px.0,
-        height: px.1,
-        orig: Vec3(1.*size.1/2., -1.*size.0/2., 1.),
-        cam: Vec3(0., 0., -1.),
-        vu: Vec3(0., size.0, 0.),
-        vv: Vec3(-1. * size.1, 0., 0.),
-        samples_per_pixel: 100
-    }
-}
-
 enum CollisionFace {
     Front,
     Back,
@@ -205,6 +180,7 @@ pub trait CollisionObject {
     fn getid(&self) -> u64;
 }
 
+#[derive(Copy, Clone)]
 struct Sphere {
     orig: Point,
     r: f64,
@@ -259,6 +235,7 @@ impl CollisionObject for Sphere {
     }
 }
 
+#[derive(Copy, Clone)]
 struct Disk {
     orig: Point,
     norm: Vec3,
@@ -494,6 +471,76 @@ fn project_ray(r: &Ray, s: &Scene, ignore_objid: u64, depth: i64) -> Color {
     }
 }
 
+struct Viewport {
+    width: u32,
+    height: u32,
+
+    orig: Point,
+    cam: Point,
+    
+    vu: Vec3,
+    vv: Vec3,
+
+    samples_per_pixel: u32
+}
+
+fn create_viewport(px: (u32, u32), size: (f64, f64), pos: &Point, dir: &Vec3, fov: f64, c_roll: f64) -> Viewport {
+
+    let dist = size.0 / (2. * (fov.to_radians() / 2.).tan());
+
+    let cam = *pos;
+
+    let roll = -1.*(-1. * dir.1).atan2(dir.2);
+    let pitch = -1.*dir.0.asin();
+    let yaw = -1.*c_roll;
+
+    println!("YPR: {} {} {}", yaw, pitch, roll);
+
+    let rot_basis = (
+        Vec3(yaw.cos()*pitch.cos(),
+             yaw.sin()*pitch.cos(),
+             -1.*pitch.sin()),
+
+        Vec3(yaw.cos()*pitch.sin()*roll.sin() - yaw.sin()*roll.cos(),
+             yaw.sin()*pitch.sin()*roll.sin() + yaw.cos()*roll.cos(),
+             pitch.cos()*roll.sin()),
+
+        Vec3(yaw.cos()*pitch.sin()*roll.cos() + yaw.sin()*roll.sin(),
+             yaw.sin()*pitch.sin()*roll.cos() - yaw.cos()*roll.sin(),
+             pitch.cos()*roll.cos())
+    );
+
+    println!("Basis:");
+    println!(" {} {} {}", rot_basis.0.0, rot_basis.0.1, rot_basis.0.2);
+    println!(" {} {} {}", rot_basis.1.0, rot_basis.1.1, rot_basis.1.2);
+    println!(" {} {} {}", rot_basis.2.0, rot_basis.2.1, rot_basis.2.2);
+
+    let orig = Vec3(1.*size.1/2., -1.*size.0/2., dist);
+    let orig_r = cam.add(&orig.change_basis(rot_basis));
+
+    println!("orig: {} {} {}", orig.0, orig.1, orig.2);
+    println!("orig_r: {} {} {}", orig_r.0, orig_r.1, orig_r.2);
+
+    let vu = Vec3(0., size.0, 0.);
+    let vu_r = vu.change_basis(rot_basis);
+
+    let vv = Vec3(-1. * size.1, 0., 0.);
+    let vv_r = vv.change_basis(rot_basis);
+
+    println!("vu_r: {} {} {}", vu_r.0, vu_r.1, vu_r.2);
+    println!("vv_r: {} {} {}", vv_r.0, vv_r.1, vv_r.2);
+
+    Viewport {
+        width: px.0,
+        height: px.1,
+        orig: orig_r,
+        cam: cam,
+        vu: vu_r,
+        vv: vv_r,
+        samples_per_pixel: 100
+    }
+}
+
 impl Viewport {
 
     fn pixel_ray(&self, px: (u32, u32)) -> Ray {
@@ -561,23 +608,26 @@ fn main() -> Result<()> {
     let width = 640;
     let height = 480;
 
-    // let n = Vec3(1., 2., 3.);
-    // let (bx, by, bz) = n.basis();
-
-    // let a = Vec3(2., 4., 6.);
-    // let a_n = a.change_basis((bx, by, bz));
-
-    // println!("bx: {} {} {}", bx.0, bx.1, bx.2);
-    // println!("by: {} {} {}", by.0, by.1, by.2);
-    // println!("bz: {} {} {}", bz.0, bz.1, bz.2);
-    // println!("bx * n: {}", bx.dot(&bz));
-    // println!("by * n: {}", by.dot(&bz));
-    // println!("bx * by: {}", bx.dot(&by));
-    // println!("a_n: {} {} {}", a_n.0, a_n.1, a_n.2);
-
     let mut data = vec![Vec3(0., 0., 0.); (width*height) as usize ];
 
-    let v = create_viewport((width, height), (1., 1. * aspect));
+    let v = create_viewport((width, height),
+                            (1., 1. * aspect),
+                            // &Vec3(0.8, 0., 3.),
+                            // &Vec3(-1., 0.0, 3.).unit(),
+                            &Vec3(0.0, 0., 2.),
+                            &Vec3(0., 0.0, 1.).unit(),
+                            90.,
+                            0_f64.to_radians());
+
+    // let v2 = create_viewport((width, height),
+    //                         (1., 1. * aspect),
+    //                         // &Vec3(5., 0., 5.),
+    //                         // &Vec3(-1., 0.0, 0.).unit(),
+    //                         &Vec3(2., 0., 0.),
+    //                         &Vec3(-1., 0.0, 1.).unit(),
+    //                         140.,
+    //                         0_f64.to_radians());
+    // return Ok(());
 
     let mut objs: Vec<Box<dyn CollisionObject>> = Vec::new();
     objs.push(Box::new(Sphere {
@@ -586,20 +636,29 @@ fn main() -> Result<()> {
         //            6. - 1.),
         orig: Vec3(-0.2,
                    0.,
-                   6.),
+                   5.),
         r: 0.5,
-        surface: SurfaceKind::Matte {
-            color: Vec3(0.3, 0.3, 0.3),
+        // surface: SurfaceKind::Solid {
+        //     color: Vec3(1., 0.3, 0.3),
+        //     // alpha: 0.5
+        // },
+        // surface: SurfaceKind::Matte {
+        //     color: Vec3(0.3, 0.3, 0.3),
+        //     alpha: 0.5
+        // },
+        surface: SurfaceKind::Reflective {
+            scattering: 0.1,
+            color: Vec3(0.8, 0.3, 0.3),
             alpha: 0.5
         },
         id: 1
     }));
     objs.push(Box::new(Sphere {
-        orig: Vec3(-15.5, 0., 6.),
-        r: 15.,
+        orig: Vec3(-50.5, 0., 5.),
+        r: 50.,
         surface: SurfaceKind::Matte {
-            color: Vec3(0.3, 0.3, 0.3),
-            alpha: 0.5
+            color: make_color((0, 150, 70)),
+            alpha: 0.4
         },
         id: 2
     }));
@@ -615,32 +674,58 @@ fn main() -> Result<()> {
     //     },
     //     id: 3
     // }));
-    objs.push(Box::new(Sphere {
-        orig: Vec3(0., -1.2, 6.2),
-        r: 0.5,
-        // surface: SurfaceKind::Solid(Vec3(1., 0., 0.)),
-        surface: SurfaceKind::Reflective {
-            scattering: 0.3,
-            color: make_color((255, 87, 51)),
-            alpha: 0.5
-        },
-        id: 4
-    }));
+    // objs.push(Box::new(Sphere {
+    //     orig: Vec3(0., -1.2, 6.2),
+    //     r: 0.5,
+    //     // surface: SurfaceKind::Solid(Vec3(1., 0., 0.)),
+    //     surface: SurfaceKind::Reflective {
+    //         scattering: 0.3,
+    //         color: make_color((255, 87, 51)),
+    //         alpha: 0.5
+    //     },
+    //     id: 4
+    // }));
+
+    let mut sphere_objs: Vec<Sphere> = Vec::new();
+    'build_spheres: for i in 0..70 {
+        let temp = random_vec().mult(1.5).add(&Vec3(0., 0., 5.));
+        let orig = Vec3(-0.5, temp.1, temp.2);
+        for obj in &sphere_objs {
+            let dist = orig.sub(&obj.orig).len();
+            if dist < 0.2 {
+                continue 'build_spheres;
+            }
+        }
+        let temp2 = random_vec();
+        let sphere = Sphere {
+            orig: orig,
+            r: 0.1,
+            // surface: SurfaceKind::Solid(Vec3(1., 0., 0.)),
+            surface: SurfaceKind::Matte {
+                color: Vec3(temp2.0.abs(), temp2.1.abs(), temp2.2.abs()),
+                alpha: (rand::random::<f64>() / 2.)
+            },
+            id: 5 + i
+        };
+        sphere_objs.push(sphere);
+        objs.push(Box::new(sphere));
+    }
+
     objs.push(Box::new(Disk {
         // orig: Vec3(0.5, 0., 7.),
         // norm: Vec3(-1., 0., -1.).unit(),
-        orig: Vec3(0., 1.0, 6.),
-        norm: Vec3(1., 0., -0.2).unit(),
-        r: 0.4,
-        depth: 1.0,
-        surface: SurfaceKind::Matte {
-            color: make_color((200, 60, 90)),
-            alpha: 0.5
-        },
-        side_surface: SurfaceKind::Reflective {
-            scattering: 0.001,
+        orig: Vec3(1., 0.0, 5.5),
+        norm: Vec3(-0.8, 0.2, -0.5).unit(),
+        r: 1.5,
+        depth: 0.05,
+        surface: SurfaceKind::Reflective {
+            scattering: 0.05,
             color: make_color((200, 60, 90)),
             alpha: 0.9
+        },
+        side_surface: SurfaceKind::Matte {
+            color: make_color((30, 30, 30)),
+            alpha: 0.3
         },
         id: 5
     }));
