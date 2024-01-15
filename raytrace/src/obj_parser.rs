@@ -1,11 +1,9 @@
 
 
 use crate::raytrace::{Vec3, SurfaceKind, CollisionObject,
-                      make_triangle, make_color, random_color};
+                      make_triangle, make_color};
 
 use std::fs;
-use std::io::Result;
-use std::path::Path;
 
 struct ObjFile {
     vertices: Vec<Vec3>,
@@ -13,7 +11,7 @@ struct ObjFile {
 }
 
 pub struct ObjObject {
-    pub objs: Vec<Box<dyn CollisionObject>>
+    pub objs: Vec<CollisionObject>
 }
 
 fn parse_obj_vertex(line: &str) -> Vec3 {
@@ -53,17 +51,26 @@ pub fn parse_obj(path: &str, offset: &Vec3, transform: (Vec3, Vec3, Vec3)) -> Ob
         parse_obj_line(line, &mut ctx);
     }
 
-    let mut objs: Vec<Box<dyn CollisionObject>> = Vec::new();
+    let mut objs: Vec<CollisionObject> = Vec::new();
     let mut count = 10;
 
     for face in ctx.faces {
-        objs.push(Box::new(make_triangle(
+        objs.push(CollisionObject::Triangle(make_triangle(
             (
                 ctx.vertices[face.0 - 1].change_basis(transform).add(offset),
                 ctx.vertices[face.1 - 1].change_basis(transform).add(offset),
                 ctx.vertices[face.2 - 1].change_basis(transform).add(offset)
             ),
-            &SurfaceKind::Solid { color: random_color() },
+            // &SurfaceKind::Solid { color: make_color((150, 150, 150)) },
+            &SurfaceKind::Matte { 
+                color: make_color((150, 150, 150)),
+                alpha: 0.4
+            },
+            // &SurfaceKind::Reflective {
+            //     scattering: 0.3,
+            //     color: make_color((200, 200, 200)),
+            //     alpha: 0.9
+            // },
             count
         )));
         count += 1;

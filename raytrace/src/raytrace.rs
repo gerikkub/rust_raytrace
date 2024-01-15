@@ -2,6 +2,14 @@
 use std::fs;
 use std::io;
 use std::io::Result;
+use std::slice::from_raw_parts;
+use std::thread;
+use std::sync::{Arc, Barrier};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use threadpool::ThreadPool;
+use std::sync::Mutex;
+use std::ops::Range;
+
 
 #[derive(Copy, Clone, Debug)]
 pub struct Vec3(pub f64, pub f64, pub f64);
@@ -130,8 +138,8 @@ impl Ray {
     }
 
     fn intersect(&self, r: &Ray) -> Option<Point> {
-        println!("{:?}", self);
-        println!("{:?}", r);
+        // println!("{:?}", self);
+        // println!("{:?}", r);
 
         let mut t1: f64 = 0.;
         let mut t2: f64 = 0.;
@@ -177,17 +185,17 @@ impl Ray {
         // let t2 = t2_num / det;
         
 
-        println!("t1: {}", t1);
-        println!("t2: {}", t2);
+        // println!("t1: {}", t1);
+        // println!("t2: {}", t2);
 
         let p1 = self.at(t1);
         let p2 = r.at(t2);
 
-        println!("P1: {:?}", p1);
-        println!("P2: {:?}", p2);
+        // println!("P1: {:?}", p1);
+        // println!("P2: {:?}", p2);
 
         let p_diff = p2.sub(&p1);
-        println!("Pdiff: {:?}", p_diff);
+        // println!("Pdiff: {:?}", p_diff);
         if p_diff.len2() < 0.01{
             Some(p1)
         } else {
@@ -257,7 +265,7 @@ pub enum CollisionFace {
     Face(u64)
 }
 
-pub trait CollisionObject {
+pub trait Collidable {
     fn intersects(&self, r: &Ray) -> Option<(f64, Point, CollisionFace)>;
     fn normal(&self, p: &Point, f: &CollisionFace) -> Vec3;
     fn getsurface(&self, f: &CollisionFace) -> SurfaceKind;
@@ -272,7 +280,7 @@ pub struct Sphere {
     pub id: u64
 }
 
-impl CollisionObject for Sphere {
+impl Collidable for Sphere {
     fn intersects(&self, r: &Ray) -> Option<(f64, Point, CollisionFace)> {
         let a = r.dir.dot(&r.dir);
         let cp_v = r.orig.sub(&self.orig);
@@ -330,7 +338,7 @@ pub struct Disk {
     pub id: u64
 }
 
-impl CollisionObject for Disk {
+impl Collidable for Disk {
     fn intersects(&self, r: &Ray) -> Option<(f64, Point, CollisionFace)> {
 
         // t = -1 * (norm * (orig - Rorig)) / (norm * Rdir)
@@ -529,9 +537,9 @@ pub fn make_triangle(points: (Vec3, Vec3, Vec3), surface: &SurfaceKind, id: u64)
     let bi = incenter.sub(&b);
     let ci = incenter.sub(&c);
 
-    println!("ai {:?}", ai);
-    println!("bi {:?}", bi);
-    println!("ci {:?}", ci);
+    // println!("ai {:?}", ai);
+    // println!("bi {:?}", bi);
+    // println!("ci {:?}", ci);
 
     let acs = ab.mult(ab.dot(&ai)/ab.len2());
     let abs = ac.mult(ac.dot(&ai)/ac.len2());
@@ -541,10 +549,10 @@ pub fn make_triangle(points: (Vec3, Vec3, Vec3), surface: &SurfaceKind, id: u64)
     let ibs = abs.sub(&ai);
     let ics = acs.sub(&ai);
 
-    println!("incenter: {:?}", incenter);
-    println!("ias {:?}", ias);
-    println!("ibs {:?}", ibs);
-    println!("ics {:?}", ics);
+    // println!("incenter: {:?}", incenter);
+    // println!("ias {:?}", ias);
+    // println!("ibs {:?}", ibs);
+    // println!("ics {:?}", ics);
 
     let bounding_len2 = ai.len2().max(bi.len2()).max(ci.len2());
 
@@ -562,12 +570,12 @@ pub fn make_triangle(points: (Vec3, Vec3, Vec3), surface: &SurfaceKind, id: u64)
         id: id
     };
 
-    println!("{:?}", tri);
+    // println!("{:?}", tri);
 
     tri
 }
 
-impl CollisionObject for Triangle {
+impl Collidable for Triangle {
     fn intersects(&self, r: &Ray) -> Option<(f64, Point, CollisionFace)> {
 
         let t = self.norm.dot(&self.incenter.sub(&r.orig)) / self.norm.dot(&r.dir);
@@ -615,12 +623,52 @@ impl CollisionObject for Triangle {
     }
 }
 
-
-pub struct Scene<'a> {
-    pub objs: &'a Vec<Box<dyn CollisionObject>>
+#[derive(Copy,Clone)]
+pub enum CollisionObject {
+    Sphere(Sphere),
+    Triangle(Triangle),
+    Disk(Disk)
 }
 
-fn color_ray(r: &Ray, s: &Scene, obj: &Box<dyn CollisionObject>, point: &Point, face: &CollisionFace, depth: i64) -> Color {
+impl Collidable for CollisionObject {
+    fn intersects(&self, r: &Ray) -> Option<(f64, Point, CollisionFace)> {
+        match *self {
+            CollisionObject::Sphere(s) => s.intersects(r),
+            CollisionObject::Triangle(t) => t.intersects(r),
+            CollisionObject::Disk(d) => d.intersects(r)
+        }
+    }
+
+    fn normal(&self, p: &Point, f: &CollisionFace) -> Vec3 {
+        match *self {
+            CollisionObject::Sphere(s) => s.normal(p, f),
+            CollisionObject::Triangle(t) => t.normal(p, f),
+            CollisionObject::Disk(d) => d.normal(p, f)
+        }
+    }
+
+    fn getsurface(&self, f: &CollisionFace) -> SurfaceKind {
+        match *self {
+            CollisionObject::Sphere(s) => s.getsurface(f),
+            CollisionObject::Triangle(t) => t.getsurface(f),
+            CollisionObject::Disk(d) => d.getsurface(f)
+        }
+    }
+
+    fn getid(&self) -> u64 {
+        match *self {
+            CollisionObject::Sphere(s) => s.getid(),
+            CollisionObject::Triangle(t) => t.getid(),
+            CollisionObject::Disk(d) => d.getid()
+        }
+    }
+}
+
+pub struct Scene<'a> {
+    pub objs: &'a Vec<CollisionObject>
+}
+
+fn color_ray(r: &Ray, s: &Scene, obj: &CollisionObject, point: &Point, face: &CollisionFace, depth: i64) -> Color {
     match obj.getsurface(face) {
         SurfaceKind::Solid {color} => {
             color
@@ -656,7 +704,7 @@ fn project_ray(r: &Ray, s: &Scene, ignore_objid: u64, depth: i64) -> Color {
 
     let blue = Vec3(0.5, 0.7, 1.);
 
-    let intersections: Vec<(f64, Point, CollisionFace, &Box<dyn CollisionObject>)> = s.objs.iter().filter_map(
+    let intersections: Vec<(f64, Point, CollisionFace, &CollisionObject)> = s.objs.iter().filter_map(
         |s| {
             if ignore_objid == s.getid() {
                 None
@@ -686,8 +734,8 @@ fn project_ray(r: &Ray, s: &Scene, ignore_objid: u64, depth: i64) -> Color {
 }
 
 pub struct Viewport {
-    width: u32,
-    height: u32,
+    width: usize,
+    height: usize,
 
     orig: Point,
     cam: Point,
@@ -695,7 +743,7 @@ pub struct Viewport {
     vu: Vec3,
     vv: Vec3,
 
-    samples_per_pixel: u32
+    samples_per_pixel: usize
 }
 
 pub fn create_transform(dir_in: &Vec3, d_roll: f64) -> (Vec3, Vec3, Vec3) {
@@ -721,7 +769,7 @@ pub fn create_transform(dir_in: &Vec3, d_roll: f64) -> (Vec3, Vec3, Vec3) {
     )
 }
 
-pub fn create_viewport(px: (u32, u32), size: (f64, f64), pos: &Point, dir: &Vec3, fov: f64, c_roll: f64) -> Viewport {
+pub fn create_viewport(px: (u32, u32), size: (f64, f64), pos: &Point, dir: &Vec3, fov: f64, c_roll: f64, samples: usize) -> Viewport {
 
     let dist = size.0 / (2. * (fov.to_radians() / 2.).tan());
 
@@ -752,19 +800,19 @@ pub fn create_viewport(px: (u32, u32), size: (f64, f64), pos: &Point, dir: &Vec3
     // println!("vv_r: {} {} {}", vv_r.0, vv_r.1, vv_r.2);
 
     Viewport {
-        width: px.0,
-        height: px.1,
+        width: px.0 as usize,
+        height: px.1 as usize,
         orig: orig_r,
         cam: cam,
         vu: vu_r,
         vv: vv_r,
-        samples_per_pixel: 10
+        samples_per_pixel: samples
     }
 }
 
 impl Viewport {
 
-    fn pixel_ray(&self, px: (u32, u32)) -> Ray {
+    fn pixel_ray(&self, px: (usize, usize)) -> Ray {
 
         let px_x = px.0 as f64;
         let px_y = px.1 as f64;
@@ -786,10 +834,12 @@ impl Viewport {
         }
     }
 
-    pub fn walk_rays(&self, s: &Scene, data: & mut[Color]) {
-        let total_rays = self.height*self.width*self.samples_per_pixel;
+    fn walk_ray_set(&self, s: &Scene, data: & mut[Color], rows: Range<usize>) {
+
+        let start_row = rows.start;
+        let total_rays = rows.len()*self.width*self.samples_per_pixel;
         let mut rays_so_far = 0;
-        for x in 0..self.height {
+        for x in rows {
             for y in 0..self.width {
                 let mut acc = Vec3(0., 0., 0.);
                 for _i in 0..self.samples_per_pixel {
@@ -797,14 +847,127 @@ impl Viewport {
                     acc = acc.add(&ray_color);
 
                     rays_so_far += 1;
-                    if rays_so_far % 1000000 == 0 {
+                    if rays_so_far % 10000 == 0 {
                         println!("{}/{} {:.1}", rays_so_far, total_rays, 100.*(rays_so_far as f64) / (total_rays as f64));
                     }
                 }
-                data[(x*self.width + y) as usize] = acc.mult(1./(self.samples_per_pixel as f64));
+                data[((x-start_row)*self.width + y) as usize] = acc.mult(1./(self.samples_per_pixel as f64));
 
             }
         }
+    }
+
+    pub fn walk_rays(&self, s: &Scene, data: & mut[Color], threads: usize) {
+
+        let rows_per_thread = (self.height as usize) / threads;
+
+        // let half_height = self.height / 2;
+        // let mut left_half = data[0..half_height*self.width].to_vec();
+        // let mut right_half = data[half_height*self.width..].to_vec();
+        // let left_half = &mut left_half;
+        // let right_half = &mut right_half;
+
+        // thread::scope(|sc| {
+        //     sc.spawn(move || {
+        //         self.walk_ray_set(s, left_half, half_height);
+        //     });
+        //     sc.spawn(move || {
+        //         self.walk_ray_set(s, right_half, self.height - half_height);
+        //     });
+        // });
+
+        // let mut results: Vec<(usize, &Vec<Color>)> = Vec::new();
+        // let mut handles: Vec<thread::ScopedJoinHandle<(usize, &Vec<Color>)>> = Vec::new();
+        let mut data_list: Vec<(usize, Arc<Mutex<Vec<Color>>>)> = Vec::new();
+
+        thread::scope(|sc| {
+            for t in 0..threads {
+                let thread_num = t;
+                let rows = if t < (threads-1) {
+                    rows_per_thread
+                } else {
+                    rows_per_thread + (self.height - rows_per_thread*threads)
+                };
+                let row_range = t*rows_per_thread..(t*rows_per_thread + rows);
+                let alloc_size = rows * self.width;
+                let data_mut: Arc<Mutex<Vec<Color>>> = Arc::new(Mutex::new(vec![Vec3(0., 0., 0.); alloc_size]));
+                let t_data = Arc::clone(&data_mut);
+                data_list.push((rows, data_mut));
+                sc.spawn(move || {
+                    println!("Thread {} has {} rows to process", thread_num, rows);
+                    // let mut d: Vec<Color> = vec![Vec3(0., 0., 0.); alloc_size];
+                    let mut d = t_data.lock().unwrap();
+                    self.walk_ray_set(s, &mut d[..], row_range);
+                });
+            }
+
+            // for h in handles {
+            //     results.push(h.join().unwrap());
+            // }
+        });
+
+        let mut curr_row = 0;
+        for (rows, d_mut) in data_list {
+            let d = d_mut.lock().unwrap();
+            data[curr_row*self.width..(curr_row+rows)*self.width].clone_from_slice(&d[..]);
+            curr_row += rows;
+        }
+
+        // let mut row_cfg: Vec<&mut Vec<Color>> = Vec::new();
+        // for t in 0..(threads-1) {
+        //     let mut v = data[t*rows_per_thread*self.width..(t+1)*rows_per_thread*self.width].to_vec();
+        //     row_cfg.push(&mut v);
+        // }
+        let remaining_rows = (self.height as usize) - (rows_per_thread * (threads - 1));
+        // let mut last_thread_d = data[(threads-1)*rows_per_thread*self.width..].to_vec();
+        // let last_thread_d = &mut last_thread_d;
+
+        // thread::scope(|sc| {
+        //     // for (t_rows, t_data) in row_cfg {
+        //     for d in row_cfg {
+        //         sc.spawn(move || {
+        //             // let mut d: Vec<Color> = Vec::with_capacity(rows_per_thread*self.width);
+        //             // let d = t_data.as_ptr() as *mut Color;
+        //             // let dslice = std::slice::from_raw_parts_mut(d, t_data.len());
+        //             self.walk_ray_set(s, d, rows_per_thread);
+        //         });
+        //     }
+
+        //     // sc.spawn(move || {
+        //     //         // let remaining_rows = (self.height as usize) - (rows_per_thread * (threads - 1));
+        //     //         // let mut d: Vec<Color> = Vec::with_capacity(remaining_rows*self.width);
+
+        //     //         // let d = t_data.as_ptr() as *mut Color;
+        //     //         // let dslice = std::slice::from_raw_parts_mut(d, t_data.len());
+        //     //         self.walk_ray_set(s, last_thread_d, remaining_rows);
+        //     // });
+        // });
+
+        // let mut curr_row = 0;
+        // for (t_rows, t_data) in row_cfg {
+        //     let mut part = &data[curr_row*self.width..(curr_row+t_rows)*self.width];
+        //     part.clone_from_slice(&t_data);
+        //     curr_row += t_rows;
+        // }
+
+        // let total_rays = self.height*self.width*self.samples_per_pixel;
+        // let mut rays_so_far = 0;
+        // for x in 0..self.height {
+        //     for y in 0..self.width {
+        //         let mut acc = Vec3(0., 0., 0.);
+        //         for _i in 0..self.samples_per_pixel {
+        //             let ray_color = project_ray(&self.pixel_ray((x,y)), s, 0, 0);
+        //             acc = acc.add(&ray_color);
+
+        //             rays_so_far += 1;
+        //             if rays_so_far % 10000 == 0 {
+        //                 println!("{}/{} {:.1}", rays_so_far, total_rays, 100.*(rays_so_far as f64) / (total_rays as f64));
+        //             }
+        //         }
+        //         data[(x*self.width + y) as usize] = acc.mult(1./(self.samples_per_pixel as f64));
+
+        //     }
+        // }
     }
 }
 

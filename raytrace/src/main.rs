@@ -1,6 +1,6 @@
 
 pub mod raytrace;
-use raytrace::{Vec3, Sphere, Disk, Scene, SurfaceKind, create_transform};
+use raytrace::{Vec3, Sphere, Disk, Scene, SurfaceKind, CollisionObject, create_transform};
 
 pub mod obj_parser;
 
@@ -17,14 +17,18 @@ fn main() -> Result<()> {
     // let height = 1440;
 
     let aspect = 480. / 640.;
+    // let width = 160;
+    // let height = 120;
     let width = 640;
     let height = 480;
 
     let mut data = vec![Vec3(0., 0., 0.); (width*height) as usize ];
 
-    let obj_data = obj_parser::parse_obj("cube.obj",
-                                         &Vec3(0., 0., 5.),
-                                         create_transform(&Vec3(1., 1., 0.5), 0.));
+    let obj_data = obj_parser::parse_obj("teapot.obj",
+                                         &Vec3(-0.5, 0., 5.),
+                                         create_transform(&Vec3(0., 0., 1.),
+                                                          270_f64.to_radians()));
+                                        //  create_transform(&Vec3(1., 1., 0.5), 0.));
 
 
     println!("Found {} objects", obj_data.objs.len());
@@ -33,16 +37,29 @@ fn main() -> Result<()> {
                             (1., 1. * aspect),
                             // &Vec3(0.8, 0., 3.),
                             // &Vec3(-1., 0.0, 3.).unit(),
-                            &Vec3(0.0, 0., 0.),
-                            &Vec3(0.1, 0.0, 1.).unit(),
+                            &Vec3(2.5, 0., 0.),
+                            &Vec3(-0.4, 0.0, 1.).unit(),
                             80.,
-                            0_f64.to_radians());
+                            0_f64.to_radians(),
+                            15);
+    
+    let mut scene_objs = obj_data.objs;
+
+    scene_objs.push(CollisionObject::Sphere(Sphere {
+        orig: Vec3(-50.5, 0., 5.),
+        r: 50.,
+        surface: SurfaceKind::Matte {
+            color: raytrace::make_color((40, 40, 40)),
+            alpha: 0.4
+        },
+        id: 2
+    }));
 
     let s = Scene {
-        objs: &obj_data.objs
+        objs: &scene_objs
     };
 
-    v.walk_rays(&s, &mut data);
+    v.walk_rays(&s, &mut data, 15);
 
     raytrace::write_png(file, (width, height), &data);
     return Ok(());
@@ -57,7 +74,7 @@ fn main() -> Result<()> {
     //                         0_f64.to_radians());
     // return Ok(());
 
-    let mut objs: Vec<Box<dyn raytrace::CollisionObject>> = Vec::new();
+    // let mut objs: Vec<Box<dyn raytrace::CollisionObject>> = Vec::new();
     // objs.push(Box::new(Sphere {
     //     // orig: Vec3(-15.5 + (15.*15. - 1.*1. as f64).sqrt(),
     //     //            0.,
@@ -81,26 +98,17 @@ fn main() -> Result<()> {
     //     },
     //     id: 1
     // }));
-    objs.push(Box::new(Sphere {
-        orig: Vec3(-50.5, 0., 5.),
-        r: 50.,
-        surface: SurfaceKind::Matte {
-            color: raytrace::make_color((0, 120, 40)),
-            alpha: 0.4
-        },
-        id: 2
-    }));
 
-    objs.push(Box::new(raytrace::make_triangle(
-              (Vec3(-0.3, 0., 4.),
-                Vec3(0., 0., 6.),
-                Vec3(0.5, 2., 5.)
-              ),
-              &SurfaceKind::Matte {
-                color: raytrace::make_color((200, 50, 50)),
-                alpha: 0.3
-            },
-            10)));
+    // objs.push(Box::new(raytrace::make_triangle(
+    //           (Vec3(-0.3, 0., 4.),
+    //             Vec3(0., 0., 6.),
+    //             Vec3(0.5, 2., 5.)
+    //           ),
+    //           &SurfaceKind::Matte {
+    //             color: raytrace::make_color((200, 50, 50)),
+    //             alpha: 0.3
+    //         },
+    //         10)));
 
     // objs.push(Box::new(Sphere {
     //     orig: Vec3(0.5, 0.0, 5.8),
@@ -151,31 +159,31 @@ fn main() -> Result<()> {
     //     objs.push(Box::new(sphere));
     // }
 
-    objs.push(Box::new(Disk {
-        // orig: Vec3(0.5, 0., 7.),
-        // norm: Vec3(-1., 0., -1.).unit(),
-        orig: Vec3(1., 0.0, 5.5),
-        norm: Vec3(-0.8, 0.2, -0.5).unit(),
-        r: 1.5,
-        depth: 0.05,
-        surface: SurfaceKind::Reflective {
-            scattering: 0.02,
-            color: raytrace::make_color((200, 60, 90)),
-            alpha: 0.9
-        },
-        side_surface: SurfaceKind::Matte {
-            color: raytrace::make_color((30, 30, 30)),
-            alpha: 0.3
-        },
-        id: 5
-    }));
+    // objs.push(CollisionObject::Dist(Disk {
+    //     // orig: Vec3(0.5, 0., 7.),
+    //     // norm: Vec3(-1., 0., -1.).unit(),
+    //     orig: Vec3(1., 0.0, 5.5),
+    //     norm: Vec3(-0.8, 0.2, -0.5).unit(),
+    //     r: 1.5,
+    //     depth: 0.05,
+    //     surface: SurfaceKind::Reflective {
+    //         scattering: 0.02,
+    //         color: raytrace::make_color((200, 60, 90)),
+    //         alpha: 0.9
+    //     },
+    //     side_surface: SurfaceKind::Matte {
+    //         color: raytrace::make_color((30, 30, 30)),
+    //         alpha: 0.3
+    //     },
+    //     id: 5
+    // }));
 
 
-    let s = Scene {
-        objs: &objs
-    };
+    // let s = Scene {
+    //     objs: &objs
+    // };
 
-    v.walk_rays(&s, &mut data);
+    // v.walk_rays(&s, &mut data, 8);
 
-    raytrace::write_png(file, (width, height), &data)
+    // raytrace::write_png(file, (width, height), &data)
 }
