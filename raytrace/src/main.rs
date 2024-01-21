@@ -19,49 +19,26 @@ fn main() -> Result<()> {
     let height = 1440;
 
     // let aspect = 480. / 640.;
-    // let width = 160;
-    // let height = 120;
     // let width = 640;
     // let height = 480;
 
-    // let aspect = 1.;
-    // let width = 1;
-    // let height = 1;
-
-    // let tri = make_triangle((Vec3(-0.9, -1., -1.1),
-    //                          Vec3(-0.9, -1.3, -0.8),
-    //                          Vec3(-1.1, -0.7, -0.8)),
-    //                          &SurfaceKind::Solid { color: make_color((0, 0, 0)) },
-    //                          0);
-    // let tri = make_triangle((Vec3(-1.9, -0., -1.2),
-    //                          Vec3(-1.1, -1.7, 0.),
-    //                          Vec3(-0.2, -1.3, -1.1)),
-    //                          &SurfaceKind::Solid { color: make_color((0, 0, 0)) },
-    //                          0);
-    // println!("{:?}", tri);
-    // let a = raytrace::box_contains_triangle(&Vec3(0., 0., 0.), 1., &tri);
-    // println!("{}", a);
-    // return Ok(());
-
-
     let mut data = vec![Vec3(0., 0., 0.); (width*height) as usize ];
 
-    let obj_data = obj_parser::parse_obj("teapot.obj",
+    let obj_data = obj_parser::parse_obj("teapot.obj", 10,
                                          &Vec3(0., 0.5, 5.),
-                                         raytrace::create_transform(&Vec3(0., 0., 1.),
-                                                                    270_f64.to_radians()));
-                                        //  create_transform(&Vec3(1., 1., 0.5), 0.));
+                                         raytrace::create_transform(&Vec3(0., 0.3, 1.).unit(),
+                                                                    270_f64.to_radians()),
+                                         &SurfaceKind::Matte { color: make_color((252, 119, 0)),
+                                                               alpha: 0.2 });
 
 
     let v = raytrace::create_viewport((width, height),
                             (1., 1. * aspect),
-                            &Vec3(3., 0., 0.),
+                            &Vec3(4., -0.5, 0.),
                             &Vec3(-0.37, 0.3, 1.).unit(),
-                            100.,
-                            // &Vec3(-0.37, 0.3, 1.).unit(),
-                            // 1.,
+                            80.,
                             0_f64.to_radians(),
-                            100);
+                            10);
     
     println!("Viewport: {:?}", v);
     
@@ -71,28 +48,33 @@ fn main() -> Result<()> {
                                             20,
                                             10);
 
-    // let t = &obj_data.objs.iter().find(|x| x.id == 1995).unwrap();
-    // println!("");
-    // println!("{:?}", t);
+    let mut otherobjs: Vec<CollisionObject> = Vec::new();
 
-    // let r = raytrace::Ray {
-    //     orig: Vec3(-17.638537549881196, 15.517733148552326, 51.72577716184108),
-    //     dir: Vec3(-0.33403897381257164, 0.27084241119938246, 0.9028080373312748)
-    // };
 
-    // let bboxes = bbox.find_obj(1995);
-    // for b in bboxes {
-    //     b.print();
-    //     println!("{}", b.collides(&r));
-    // }
+    otherobjs.push(CollisionObject::Disk(Disk {
+        orig: Vec3(4., 4., 7.),
+        norm: Vec3(-0.3, -0.55, -0.5).unit(),
+        r: 2.,
+        depth: 0.1,
+        surface: SurfaceKind::Reflective { scattering: 0.002,
+                                           color: make_color((230, 230, 230)),
+                                           alpha: 0.7 },
+        side_surface: SurfaceKind::Matte { color: make_color((40, 40, 40)),
+                                           alpha: 0.2 },
+        id: 1
+    }));
 
-    // println!("{}", t.intersects(&r).is_some());
-
-    // bbox.print_tree();
-    // return Ok(());
-
+    otherobjs.push(CollisionObject::Sphere(Sphere {
+        orig: Vec3(-50., 0., 5.),
+        r: 50.,
+        surface: SurfaceKind::Matte { color: make_color((40, 40, 40)),
+                                      alpha: 0.2 },
+        id: 2
+    }));
+        
     let s = Scene {
-        boxes: bbox
+        boxes: bbox,
+        otherobjs: otherobjs
     };
 
     let progress_ctx = v.walk_rays(&s, &mut data, 20);

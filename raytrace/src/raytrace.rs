@@ -1,4 +1,5 @@
 
+use core::panic;
 use std::fs;
 use std::hash::Hash;
 use std::io;
@@ -190,24 +191,6 @@ impl Ray {
         ap.add(&self.orig)
     }
 }
-
-/*
-fn random_ray(orig: &Point, norm: &Vec3) -> Ray {
-
-    let mut dir = random_vec();
-
-    let cos_theta = norm.dot(&dir);
-
-    if cos_theta < 0. {
-        dir = dir.mult(-1.);
-    };
-
-    Ray {
-        orig: *orig,
-        dir: dir
-    }
-}
-*/
 
 fn reflect_ray(orig: &Point, norm: &Vec3, dir: &Vec3, fuzz: f64) -> Ray {
 
@@ -473,10 +456,11 @@ pub struct Triangle {
     side_c_d: f64,
     corners: (Point, Point, Point),
     surface: SurfaceKind,
+    edge: f64,
     pub id: usize
 }
 
-pub fn make_triangle(points: (Vec3, Vec3, Vec3), surface: &SurfaceKind, id: usize) -> Triangle {
+pub fn make_triangle(points: (Vec3, Vec3, Vec3), surface: &SurfaceKind, edge: f64, id: usize) -> Triangle {
 
     let a = points.0;
     let b = points.1;
@@ -527,6 +511,7 @@ pub fn make_triangle(points: (Vec3, Vec3, Vec3), surface: &SurfaceKind, id: usiz
         side_c_d: ics.len(),
         corners: points,
         surface: *surface,
+        edge: edge,
         id: id
     }
 }
@@ -552,9 +537,9 @@ impl Collidable for Triangle {
             return None;
         }
 
-        let side = if ip.dot(&self.side_a) > self.side_a_d*0.85 ||
-                      ip.dot(&self.side_b) > self.side_b_d*0.85 ||
-                      ip.dot(&self.side_c) > self.side_c_d*0.85 {
+        let side = if ip.dot(&self.side_a) > self.side_a_d*self.edge ||
+                      ip.dot(&self.side_b) > self.side_b_d*self.edge ||
+                      ip.dot(&self.side_c) > self.side_c_d*self.edge {
             CollisionFace::Edge
         } else {
             if r.dir.dot(&self.norm) > 0. {
@@ -589,151 +574,10 @@ impl Collidable for Triangle {
 
 
 #[derive(Copy,Clone)]
-pub struct Cuboid {
-    orig: Vec3,
-    face_a: Vec3,
-    face_a_d: f64,
-    face_b: Vec3,
-    face_b_d: f64,
-    face_c: Vec3,
-    face_c_d: f64,
-    faces: [(usize, Vec3, Vec3, Vec3, Vec3); 6],
-    surface: [SurfaceKind; 6],
-    id: usize
-}
-
-// pub fn make_cuboid(orig: Point, sides: (Vec3, Vec3, Vec3), surface: &[SurfaceKind; 6], id: u64) -> Cuboid {
-
-//     let faces = [
-//         (0, orig.add(&sides.0), sides.0.unit(), sides.1, sides.2),
-//         (1, orig.sub(&sides.0), sides.0.mult(-1.).unit(), sides.1, sides.2),
-//         (2, orig.add(&sides.1), sides.1.unit(), sides.0, sides.2),
-//         (3, orig.sub(&sides.1), sides.1.mult(-1.).unit(), sides.0, sides.2),
-//         (4, orig.add(&sides.2), sides.2.unit(), sides.0, sides.1),
-//         (5, orig.sub(&sides.2), sides.2.mult(-1.).unit(), sides.0, sides.1),
-//     ];
-
-//     Cuboid {
-//         orig: orig,
-//         face_a: sides.0.unit(),
-//         face_a_d: sides.0.len(),
-//         face_b: sides.1.unit(),
-//         face_b_d: sides.1.len(),
-//         face_c: sides.2.unit(),
-//         face_c_d: sides.2.len(),
-//         faces: faces,
-//         surface: *surface,
-//         id: id
-//     }
-// }
-
-impl Cuboid {
-    fn intersect_face(&self, r: &Ray, f: (&Vec3, &Vec3)) -> f64 {
-
-        // t = -1 * (norm * (orig - Rorig)) / (norm * Rdir)
-        let t = f.1.dot(&f.0.sub(&r.orig)) / f.1.dot(&r.dir);
-        t
-    }
-}
-
-static mut last_face_val: usize = 0;
-static mut last_face_ray: Ray = Ray { orig: Vec3(0., 0., 0.), dir: Vec3(0., 0., 0.)};
-static mut last_face_op: Vec3 = Vec3(0., 0., 0.);
-
-impl Collidable for Cuboid {
-    fn intersects(&self, r: &Ray) -> Option<(f64, Point, CollisionFace)> {
-
-        let ao = self.orig.sub(&r.orig);
-        let ap = r.dir.mult(ao.dot(&r.dir)/r.dir.len2());
-        let op = ap.sub(&ao);
-
-        let op_a = op.dot(&self.face_a);
-        let op_b = op.dot(&self.face_b);
-        let op_c = op.dot(&self.face_c);
-
-        if op_a.abs() > self.face_a_d ||
-           op_b.abs() > self.face_b_d ||
-           op_c.abs() > self.face_c_d {
-            return None;
-        }
-
-        let mut hit = None;
-
-        for (fnum, forig, fdir, forth0, forth1) in self.faces {
-            let t = self.intersect_face(r, (&forig, &fdir));
-            if t < 0. {
-                continue;
-            }
-            let p = r.at(t);
-            let fop = p.sub(&forig);
-
-            let fedgelen0 = fop.dot(&forth0) / forth0.len();
-            let fedgelen1 = fop.dot(&forth1) / forth1.len();
-
-            if fedgelen0.abs() < forth0.len() &&
-               fedgelen1.abs() < forth1.len() {
-                
-                match hit {
-                    None => {
-                        hit = Some((fnum, t));
-                    },
-                    Some((hfnum, ht)) => {
-                        if t < ht {
-                            hit = Some((fnum, t));
-                        }
-                    }
-                };
-            }
-        }
-
-        match hit {
-            None => {
-                None
-            },
-            Some((hfnum, ht)) => {
-                Some((ht, r.at(ht), CollisionFace::Face(hfnum)))
-            }
-        }
-    }
-
-
-    fn normal(&self, _p: &Point, f: &CollisionFace) -> Vec3 {
-        match f {
-            CollisionFace::Face(n) => {
-                match n {
-                    0 => self.face_a,
-                    1 => self.face_a.mult(-1.),
-                    2 => self.face_b,
-                    3 => self.face_b.mult(-1.),
-                    4 => self.face_c,
-                    5 => self.face_c.mult(-1.),
-                    _ => panic!("Invalid face num {}", n)
-                }
-            },
-            _ => panic!("Invalid face {:?} for cuboid", f)
-        }
-    }
-
-    fn getsurface(&self, f: &CollisionFace) -> SurfaceKind {
-        match f {
-            CollisionFace::Face(n) => {
-                self.surface[*n]
-            },
-            _ => panic!("Invalid face {:?} for cuboid", f)
-        }
-    }
-
-    fn getid(&self) -> usize {
-        self.id
-    }
-}
-
-#[derive(Copy,Clone)]
 pub enum CollisionObject {
     Sphere(Sphere),
     Triangle(Triangle),
     Disk(Disk),
-    Cuboid(Cuboid),
 }
 
 impl Collidable for CollisionObject {
@@ -742,7 +586,6 @@ impl Collidable for CollisionObject {
             CollisionObject::Sphere(s) => s.intersects(r),
             CollisionObject::Triangle(t) => t.intersects(r),
             CollisionObject::Disk(d) => d.intersects(r),
-            CollisionObject::Cuboid(c) => c.intersects(r)
         }
     }
 
@@ -751,7 +594,6 @@ impl Collidable for CollisionObject {
             CollisionObject::Sphere(s) => s.normal(p, f),
             CollisionObject::Triangle(t) => t.normal(p, f),
             CollisionObject::Disk(d) => d.normal(p, f),
-            CollisionObject::Cuboid(c) => c.normal(p, f)
         }
     }
 
@@ -760,7 +602,6 @@ impl Collidable for CollisionObject {
             CollisionObject::Sphere(s) => s.getsurface(f),
             CollisionObject::Triangle(t) => t.getsurface(f),
             CollisionObject::Disk(d) => d.getsurface(f),
-            CollisionObject::Cuboid(c) => c.getsurface(f)
         }
     }
 
@@ -769,7 +610,6 @@ impl Collidable for CollisionObject {
             CollisionObject::Sphere(s) => s.getid(),
             CollisionObject::Triangle(t) => t.getid(),
             CollisionObject::Disk(d) => d.getid(),
-            CollisionObject::Cuboid(c) => c.getid()
         }
     }
 }
@@ -777,7 +617,7 @@ impl Collidable for CollisionObject {
 pub struct BoundingBox<'a> {
     orig: Point,
     len2: f64,
-    objs: Option<Vec<&'a Triangle>>,
+    objs: Option<Vec<&'a CollisionObject>>,
     child_boxes: Option<Vec<BoundingBox<'a>>>,
     depth: usize
 }
@@ -894,20 +734,24 @@ pub fn box_contains_triangle(orig: &Point, len2: f64, t: &Triangle) -> bool {
     false
 }
 
-
-pub fn build_bounding_box<'a>(objs: &'a Vec<Triangle>, orig: &Point, len2: f64, maxdepth: usize, minobjs: usize) -> BoundingBox<'a> {
-    let mut refvec: Vec<&Triangle> = Vec::with_capacity(objs.len());
+pub fn build_bounding_box<'a>(objs: &'a Vec<CollisionObject>, orig: &Point, len2: f64, maxdepth: usize, minobjs: usize) -> BoundingBox<'a> {
+    let mut refvec: Vec<&CollisionObject> = Vec::with_capacity(objs.len());
     refvec.extend(objs);
     build_bounding_box_helper(&refvec, orig, len2, 0, maxdepth, minobjs)
 }
 
-fn build_bounding_box_helper<'a>(objs: &Vec<&'a Triangle>, orig: &Point, len2: f64, depth: usize, maxdepth: usize, minobjs: usize) -> BoundingBox<'a> {
+fn build_bounding_box_helper<'a>(objs: &Vec<&'a CollisionObject>, orig: &Point, len2: f64, depth: usize, maxdepth: usize, minobjs: usize) -> BoundingBox<'a> {
 
-    let mut subobjs: Vec<&Triangle> = Vec::with_capacity(objs.len());
-    for t in objs {
-        if box_contains_triangle(orig, len2, t) {
-            subobjs.push(t);
-        }
+    let mut subobjs: Vec<&CollisionObject> = Vec::with_capacity(objs.len());
+    for o in objs {
+        match o {
+            CollisionObject::Triangle(t) => {
+                if box_contains_triangle(orig, len2, t) {
+                    subobjs.push(o);
+                }
+            },
+            _ => panic!("Only triangles supported")
+        };
     }
 
     if subobjs.len() == 0 {
@@ -954,9 +798,9 @@ fn build_bounding_box_helper<'a>(objs: &Vec<&'a Triangle>, orig: &Point, len2: f
     }
 }
 
-pub fn build_trivial_bounding_box<'a>(objs: &'a Vec<Triangle>, orig: &Point, len2: f64) -> BoundingBox<'a> {
+pub fn build_trivial_bounding_box<'a>(objs: &'a Vec<CollisionObject>, orig: &Point, len2: f64) -> BoundingBox<'a> {
 
-    let mut refvec: Vec<&Triangle> = Vec::with_capacity(objs.len());
+    let mut refvec: Vec<&CollisionObject> = Vec::with_capacity(objs.len());
     refvec.extend(objs);
     BoundingBox {
         orig: *orig,
@@ -1022,16 +866,16 @@ impl BoundingBox<'_> {
         hit
     }
 
-    fn get_all_objects_for_ray(&self, r: &Ray, path: &mut Vec<BoundingBox>) -> HashMap<usize, &Triangle> {
+    fn get_all_objects_for_ray(&self, r: &Ray, path: &mut Vec<BoundingBox>) -> HashMap<usize, &CollisionObject> {
 
-        let mut objmap: HashMap<usize, &Triangle> = HashMap::new();
+        let mut objmap: HashMap<usize, &CollisionObject> = HashMap::new();
 
         self.get_all_objects_for_ray_helper(r, &mut objmap, path);
 
         objmap
     }
 
-    fn get_all_objects_for_ray_helper<'a>(&'a self, r: &Ray, objmap: &mut HashMap<usize, &'a Triangle>, path: &mut Vec<BoundingBox>) {
+    fn get_all_objects_for_ray_helper<'a>(&'a self, r: &Ray, objmap: &mut HashMap<usize, &'a CollisionObject>, path: &mut Vec<BoundingBox>) {
         if self.objs.is_none() &&
            self.child_boxes.is_none() {
             return;
@@ -1039,7 +883,7 @@ impl BoundingBox<'_> {
         if self.collides(r) {
             if self.objs.is_some() {
                 objmap.extend(self.objs.as_ref().unwrap().iter().map(
-                    |t| { (t.id, *t) }
+                    |t| { (t.getid(), *t) }
                 ));
             }
 
@@ -1074,14 +918,6 @@ impl BoundingBox<'_> {
                  });
     }
 
-// pub struct BoundingBox<'a> {
-//     orig: Point,
-//     len2: f64,
-//     objs: Option<Vec<&'a Triangle>>,
-//     child_boxes: Option<Vec<BoundingBox<'a>>>,
-//     depth: usize
-// }
-
     pub fn find_obj<'a>(&'a self, id: usize) -> Vec<&'a BoundingBox> {
         let mut found_list: Vec<&BoundingBox> = Vec::new();
         self.find_obj_helper(id, &mut found_list);
@@ -1107,10 +943,11 @@ impl BoundingBox<'_> {
 }
 
 pub struct Scene<'a> {
-    pub boxes: BoundingBox<'a>
+    pub boxes: BoundingBox<'a>,
+    pub otherobjs: Vec<CollisionObject>
 }
 
-fn color_ray(r: &Ray, s: &Scene, obj: &Triangle, point: &Point, face: &CollisionFace, depth: i64) -> Color {
+fn color_ray(r: &Ray, s: &Scene, obj: &CollisionObject, point: &Point, face: &CollisionFace, depth: i64) -> Color {
     match obj.getsurface(face) {
         SurfaceKind::Solid {color} => {
             color
@@ -1147,9 +984,10 @@ fn project_ray(r: &Ray, s: &Scene, ignore_objid: usize, depth: i64) -> Color {
     let blue = Vec3(0.5, 0.7, 1.);
 
     let mut path: Vec<BoundingBox> = Vec::new();
-    let objs = s.boxes.get_all_objects_for_ray(r, &mut path);
+    let mut objs = s.boxes.get_all_objects_for_ray(r, &mut path);
+    objs.extend(s.otherobjs.iter().map(|o| (o.getid(), o)));
 
-    let intersections: Vec<(f64, Point, CollisionFace, &Triangle)> = objs.iter().filter_map(
+    let intersections: Vec<(f64, Point, CollisionFace, &CollisionObject)> = objs.iter().filter_map(
         |(k, s)| {
             if ignore_objid == *k {
                 None
