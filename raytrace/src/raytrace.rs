@@ -10,9 +10,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::ops::Range;
 use std::sync::mpsc::{channel, Sender};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time;
-use std::time::Instant;
 
 use crate::progress;
 use crate::progress::ProgressCtx;
@@ -947,38 +946,40 @@ pub struct Scene<'a> {
     pub otherobjs: Vec<CollisionObject>
 }
 
-fn color_ray(r: &Ray, s: &Scene, obj: &CollisionObject, point: &Point, face: &CollisionFace, depth: i64) -> Color {
+fn color_ray(r: &Ray, s: &Scene, obj: &CollisionObject, point: &Point, face: &CollisionFace, depth: usize) -> (Color, usize) {
     match obj.getsurface(face) {
         SurfaceKind::Solid {color} => {
-            color
+            (color, depth+1)
         },
         SurfaceKind::Matte {color, alpha} => {
-            mix_color(&color,
+            (mix_color(&color,
                       &project_ray(&lambertian_ray(point,
                                                    &obj.normal(point, face)),
                                    s,
                                    obj.getid(),
-                                   depth + 1),
-                      alpha)
+                                   depth + 1).0,
+                      alpha),
+             depth+1)
         },
         SurfaceKind::Reflective {scattering, color, alpha}  => {
-            mix_color(&color,
+            (mix_color(&color,
                       &project_ray(&reflect_ray(point,
                                                 &obj.normal(point, face),
                                                 &r.dir,
                                                 scattering),
                                    s,
                                    obj.getid(),
-                                   depth + 1),
-                       alpha)
+                                   depth + 1).0,
+                       alpha),
+             depth + 2)
         }
     }
 }
 
-fn project_ray(r: &Ray, s: &Scene, ignore_objid: usize, depth: i64) -> Color {
+fn project_ray(r: &Ray, s: &Scene, ignore_objid: usize, depth: usize) -> (Color, usize) {
 
     if depth > 5 {
-        return Vec3(0., 0., 0.);
+        return (Vec3(0., 0., 0.), depth);
     }
 
     let blue = Vec3(0.5, 0.7, 1.);
@@ -1000,7 +1001,7 @@ fn project_ray(r: &Ray, s: &Scene, ignore_objid: usize, depth: i64) -> Color {
         }).collect();
 
     if intersections.len() == 0 {
-        blue
+        (blue, depth+1)
     } else {
         let (_dist, point, face, obj) = intersections.iter().fold(&intersections[0],
             |acc, x| {
@@ -1008,9 +1009,7 @@ fn project_ray(r: &Ray, s: &Scene, ignore_objid: usize, depth: i64) -> Color {
                 let (acc_dist, _, _, _) = acc;
                 if dist < acc_dist { x } else { acc }
             });
-            let t4 = time::Instant::now();
             color_ray(r, s, obj, point, &face, depth)
-
     }
 }
 
@@ -1119,64 +1118,84 @@ impl Viewport {
         }
     }
 
-    fn walk_ray_set(&self, s: &Scene, data: & mut[Color], rows: Range<usize>,
-                    t_num: usize, progress_tx: Sender<(usize, usize, usize)>) {
+    fn walk_ray_set(&self, s: &Scene, rows: Arc<Mutex<VecDeque<(&mut [Color], usize)>>>,
+                    t_num: usize, progress_tx: Sender<(usize, usize, usize, usize)>) {
 
-        let start_row = rows.start;
-        let total_rays = rows.len()*self.width*self.samples_per_pixel;
-        let mut rays_so_far = 0;
-        for x in rows {
+        let mut rays_count = 0;
+        let mut pixels_processed = 0;
+        'threadloop: loop {
+            let mut data: &mut [Color] = &mut [];
+            let mut row: usize = 0;
+            let t1 = time::Instant::now();
+            {
+                match rows.lock().unwrap().pop_front() {
+                    Some(x) => {
+                        data = x.0;
+                        row = x.1;
+                    }
+                    None => break 'threadloop
+                };
+            }
+            
+            let _ = progress_tx.send((t_num, row, 0, 0));
             for y in 0..self.width {
                 let mut acc = Vec3(0., 0., 0.);
                 for _i in 0..self.samples_per_pixel {
-                    let ray_color = project_ray(&self.pixel_ray((x,y)), s, 0, 0);
+                    let (ray_color, rays) = project_ray(&self.pixel_ray((row,y)), s, 0, 0);
                     acc = acc.add(&ray_color);
 
-                    rays_so_far += 1;
-                    if rays_so_far % 100 == 0 {
-                        let _ = progress_tx.send((t_num, rays_so_far, total_rays));
-                    }
+                    rays_count += rays;
                 }
-                data[((x-start_row)*self.width + y) as usize] = acc.mult(1./(self.samples_per_pixel as f64));
-
+                data[y as usize] = acc.mult(1./(self.samples_per_pixel as f64));
+                pixels_processed += 1;
+                if rays_count > 10000 {
+                    let _ = progress_tx.send((t_num, row, pixels_processed, rays_count));
+                    rays_count = 0;
+                    pixels_processed = 0;
+                }
             }
+            let _ = progress_tx.send((t_num, row, pixels_processed, rays_count));
+            rays_count = 0;
+            pixels_processed = 0;
         }
-        let _ = progress_tx.send((t_num, total_rays, total_rays));
+
+        // println!("Thread T Blocked: {:.03} Processing {:.03}", time_blocked, time_processing);
     }
 
     pub fn walk_rays(&self, s: &Scene, data: & mut[Color], threads: usize) -> ProgressCtx {
 
         let rows_per_thread = (self.height as usize) / threads;
-        let mut data_list: Vec<(usize, Arc<Mutex<Vec<Color>>>)> = Vec::new();
         let (progress_tx, progress_rx) = channel();
-        let total_rays = self.height * self.width * self.samples_per_pixel;
+        let total_pixels = self.height * self.width;
 
-        let mut progress_io = progress::create_ctx(threads, total_rays, true);
+        let mut progress_io = progress::create_ctx(threads, self.width, self.height, true);
+
 
         thread::scope(|sc| {
+
+            let data_parts: Arc<Mutex<VecDeque<(&mut [Color], usize)>>> = 
+                Arc::new(Mutex::new(VecDeque::from(
+                    data.chunks_mut(self.width).zip(0..self.height).collect::<VecDeque<(&mut [Color], usize)>>())));
+
             for t in 0..threads {
-                let rows = if t < (threads-1) {
-                    rows_per_thread
-                } else {
-                    rows_per_thread + (self.height - rows_per_thread*threads)
-                };
-                let row_range = t*rows_per_thread..(t*rows_per_thread + rows);
-                let alloc_size = rows * self.width;
-                let data_mut: Arc<Mutex<Vec<Color>>> = Arc::new(Mutex::new(vec![Vec3(0., 0., 0.); alloc_size]));
-                let t_data = Arc::clone(&data_mut);
-                data_list.push((rows, data_mut));
+                // let alloc_size = rows * self.width;
+                // let data_mut: Arc<Mutex<Vec<Color>>> = Arc::new(Mutex::new(vec![Vec3(0., 0., 0.); alloc_size]));
+                // let t_data = Arc::clone(&data_mut);
+                // data_list.push((rows, data_mut));
                 let t_progress_tx = progress_tx.clone();
+                let t_parts = Arc::clone(&data_parts);
                 sc.spawn(move || {
-                    let mut d = t_data.lock().unwrap();
-                    self.walk_ray_set(s, &mut d[..], row_range, t, t_progress_tx);
+                    // let mut d = t_data.lock().unwrap();
+                    // self.walk_ray_set(s, &mut d[..], row_range, t, t_progress_tx);
+                    self.walk_ray_set(s, t_parts, t, t_progress_tx);
                 });
             }
 
             drop(progress_tx);
             'waitloop: loop {
                 match progress_rx.recv() {
-                    Ok((t_num, rays_so_far, total_rays)) => {
-                        progress_io.update(t_num, rays_so_far, total_rays);
+                    Ok((t_num, row, y, rays_so_far)) => {
+                        progress_io.update(t_num, row, y, rays_so_far);
                     }
                     Err(x) => {
                         break 'waitloop;
@@ -1185,12 +1204,12 @@ impl Viewport {
             }
         });
 
-        let mut curr_row = 0;
-        for (rows, d_mut) in data_list {
-            let d = d_mut.lock().unwrap();
-            data[curr_row*self.width..(curr_row+rows)*self.width].clone_from_slice(&d[..]);
-            curr_row += rows;
-        }
+        // let mut curr_row = 0;
+        // for (rows, d_mut) in data_list {
+        //     let d = d_mut.lock().unwrap();
+        //     data[curr_row*self.width..(curr_row+rows)*self.width].clone_from_slice(&d[..]);
+        //     curr_row += rows;
+        // }
 
         progress_io.finish();
 

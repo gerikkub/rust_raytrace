@@ -38,7 +38,7 @@ fn main() -> Result<()> {
                             &Vec3(-0.37, 0.3, 1.).unit(),
                             80.,
                             0_f64.to_radians(),
-                            10);
+                            100);
     
     println!("Viewport: {:?}", v);
     
@@ -77,7 +77,7 @@ fn main() -> Result<()> {
         otherobjs: otherobjs
     };
 
-    let progress_ctx = v.walk_rays(&s, &mut data, 20);
+    let progress_ctx = v.walk_rays(&s, &mut data, 16);
 
     progress_ctx.print_stats();
 

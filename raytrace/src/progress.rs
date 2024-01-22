@@ -1,4 +1,5 @@
 
+use core::num;
 use std::io;
 use std::time;
 use std::time::Instant;
@@ -8,12 +9,15 @@ use crossterm::{execute, terminal, style, cursor};
 pub struct ProgressCtx {
     start_time: time::Instant,
     stop_time: time::Instant,
-    etas: Vec<usize>,
+    num_threads: usize,
+    width: usize,
+    height: usize,
+    finished_pixels: usize,
     total_rays: usize,
     enable_io: bool
 }
 
-pub fn create_ctx(threads: usize, total_rays: usize, enable_io: bool) -> ProgressCtx {
+pub fn create_ctx(threads: usize, width: usize, height: usize, enable_io: bool) -> ProgressCtx {
     if enable_io {
         execute!(
             io::stdout(),
@@ -26,8 +30,11 @@ pub fn create_ctx(threads: usize, total_rays: usize, enable_io: bool) -> Progres
     ProgressCtx {
         start_time: time::Instant::now(),
         stop_time: time::Instant::now(),
-        etas: vec![0; threads],
-        total_rays: total_rays,
+        num_threads: threads,
+        width: width,
+        height: height,
+        finished_pixels: 0,
+        total_rays: 0,
         enable_io: enable_io
     }
 }
@@ -35,36 +42,38 @@ pub fn create_ctx(threads: usize, total_rays: usize, enable_io: bool) -> Progres
 
 impl ProgressCtx {
 
-    pub fn update(&mut self, tnum: usize, rays: usize, total_rays: usize) {
+    pub fn update(&mut self, tnum: usize, row: usize, pixels: usize, rays: usize) {
 
         let elapsed = time::Instant::now() - self.start_time;
         let secs = elapsed.as_secs();
         let sub_millis = elapsed.subsec_millis();
 
-        let complete_fraction = (rays as f64)/(total_rays as f64);
-        let secs_per_ray = (secs as f64) / (rays as f64);
-        let remaining_sec_est = (secs_per_ray * ((total_rays - rays) as f64)) as usize;
-        self.etas[tnum] = remaining_sec_est;
+        self.finished_pixels += pixels;
+        self.total_rays += rays;
+        let total_pixels = self.width * self.height;
 
-        let max_eta = self.etas.iter().max().unwrap();
+        let complete_fraction = (self.finished_pixels as f64)/(total_pixels as f64);
+        let secs_per_pixel = (secs as f64) / (self.finished_pixels as f64);
+        let remaining_sec_est = (secs_per_pixel * ((total_pixels - self.finished_pixels) as f64)) as usize;
+
+        let rays_per_sec = self.total_rays as f64 / elapsed.as_secs_f64();
 
         if self.enable_io {
             execute!(io::stdout(),
                         cursor::MoveTo(0, 0),
-                        style::Print(format!("Run time: {}:{:02}.{:03} ETA: {}:{:02}",
+                        style::Print(format!("Run time: {}:{:02}.{:03} Est: {}:{:02}\n",
                                             secs/60, secs % 60, sub_millis,
-                                            max_eta / 60, max_eta % 60))
-                    ).unwrap();
+                                            remaining_sec_est/60, remaining_sec_est % 60)),
+                        style::Print(format!("Completed: {}/{} {:.2}\n",
+                                             self.finished_pixels, total_pixels,
+                                             complete_fraction * 100.)),
+                        style::Print(format!("Rays so far: {} {:.3} million rays/s\n",
+                                             self.total_rays, rays_per_sec/(1_000_000.))),
+                        style::Print(format!("Threads: {}", self.num_threads)),
 
-
-            execute!(io::stdout(),
-                        cursor::MoveTo(0, (tnum+1) as u16),
-                        style::Print(format!("Thread {:02}: {}/{} {:.2} ETA: {}:{:02}",
-                                            tnum, rays, total_rays,
-                                            100. * complete_fraction,
-                                            remaining_sec_est / 60,
-                                            remaining_sec_est % 60,
-                                            ))
+                        cursor::MoveTo(0, (tnum+4) as u16),
+                        terminal::Clear(terminal::ClearType::CurrentLine),
+                        style::Print(format!("Thread {:02}: {}", tnum, row))
                     ).unwrap();
         }
     }
