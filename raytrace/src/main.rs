@@ -14,13 +14,13 @@ fn main() -> Result<()> {
     let path = Path::new("test.png");
     let file = fs::File::create(&path)?;
 
-    let aspect = 1440. / 2560.;
-    let width = 2560;
-    let height = 1440;
+    // let aspect = 1440. / 2560.;
+    // let width = 2560;
+    // let height = 1440;
 
-    // let aspect = 480. / 640.;
-    // let width = 640;
-    // let height = 480;
+    let aspect = 480. / 640.;
+    let width = 640;
+    let height = 480;
 
     let mut data = vec![Vec3(0., 0., 0.); (width*height) as usize ];
 
@@ -34,11 +34,11 @@ fn main() -> Result<()> {
 
     let v = raytrace::create_viewport((width, height),
                             (1., 1. * aspect),
-                            &Vec3(4., -0.5, 0.),
-                            &Vec3(-0.37, 0.3, 1.).unit(),
+                            &Vec3(4., 0., 3.),
+                            &Vec3(-0.5, 0.2, 1.).unit(),
                             80.,
                             0_f64.to_radians(),
-                            100);
+                            10);
     
     println!("Viewport: {:?}", v);
     
@@ -77,7 +77,7 @@ fn main() -> Result<()> {
         otherobjs: otherobjs
     };
 
-    let progress_ctx = v.walk_rays(&s, &mut data, 16);
+    let progress_ctx = v.walk_rays(&s, &mut data, 8);
 
     progress_ctx.print_stats();
 

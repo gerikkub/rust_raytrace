@@ -1054,22 +1054,22 @@ pub fn create_viewport(px: (u32, u32), size: (f64, f64), pos: &Point, dir: &Vec3
 
     let dist = size.0 / (2. * (fov.to_radians() / 2.).tan());
 
-    let cam = *pos;
-
     let rot_basis = create_transform(dir, c_roll);
 
-    // println!("YPR: {} {} {}", yaw, pitch, roll);
-
     // println!("Basis:");
-    // println!(" {} {} {}", rot_basis.0.0, rot_basis.0.1, rot_basis.0.2);
-    // println!(" {} {} {}", rot_basis.1.0, rot_basis.1.1, rot_basis.1.2);
-    // println!(" {} {} {}", rot_basis.2.0, rot_basis.2.1, rot_basis.2.2);
+    // println!(" {:?}", rot_basis.0);
+    // println!(" {:?}", rot_basis.1);
+    // println!(" {:?}", rot_basis.2);
 
-    let orig = Vec3(1.*size.1/2., -1.*size.0/2., dist);
-    let orig_r = cam.add(&orig.change_basis(rot_basis));
+    let orig = pos.add(&Vec3(1.*size.1/2., -1.*size.0/2., 0.));
+    
+    let cam_r = Vec3(0., 0., dist).change_basis(rot_basis);
+    let cam = pos.sub(&cam_r);
 
-    // println!("orig: {} {} {}", orig.0, orig.1, orig.2);
-    // println!("orig_r: {} {} {}", orig_r.0, orig_r.1, orig_r.2);
+    // println!("pos: {:?}", pos);
+    // println!("dist: {:?}", dist);
+    // println!("cam: {:?}", cam);
+    // println!("orig: {:?}", orig);
 
     let vu = Vec3(0., size.0, 0.);
     let vu_r = vu.change_basis(rot_basis);
@@ -1077,13 +1077,13 @@ pub fn create_viewport(px: (u32, u32), size: (f64, f64), pos: &Point, dir: &Vec3
     let vv = Vec3(-1. * size.1, 0., 0.);
     let vv_r = vv.change_basis(rot_basis);
 
-    // println!("vu_r: {} {} {}", vu_r.0, vu_r.1, vu_r.2);
-    // println!("vv_r: {} {} {}", vv_r.0, vv_r.1, vv_r.2);
+    // println!("vu_r: {:?}", vu_r);
+    // println!("vv_r: {:?}", vv_r);
 
     Viewport {
         width: px.0 as usize,
         height: px.1 as usize,
-        orig: orig_r,
+        orig: orig,
         cam: cam,
         vu: vu_r,
         vv: vv_r,
@@ -1158,8 +1158,6 @@ impl Viewport {
             rays_count = 0;
             pixels_processed = 0;
         }
-
-        // println!("Thread T Blocked: {:.03} Processing {:.03}", time_blocked, time_processing);
     }
 
     pub fn walk_rays(&self, s: &Scene, data: & mut[Color], threads: usize) -> ProgressCtx {
@@ -1168,7 +1166,7 @@ impl Viewport {
         let (progress_tx, progress_rx) = channel();
         let total_pixels = self.height * self.width;
 
-        let mut progress_io = progress::create_ctx(threads, self.width, self.height, true);
+        let mut progress_io = progress::create_ctx(threads, self.width, self.height, false);
 
 
         thread::scope(|sc| {
