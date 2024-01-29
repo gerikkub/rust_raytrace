@@ -1,14 +1,14 @@
 
-use core::num;
 use std::io;
 use std::time;
-use std::time::Instant;
 use std::usize;
+use std::collections::HashMap;
 use crossterm::{execute, terminal, style, cursor};
 
 pub struct ProgressCtx {
     start_time: time::Instant,
     stop_time: time::Instant,
+    runtimes: HashMap<String, time::Duration>,
     num_threads: usize,
     width: usize,
     height: usize,
@@ -30,6 +30,7 @@ pub fn create_ctx(threads: usize, width: usize, height: usize, enable_io: bool) 
     ProgressCtx {
         start_time: time::Instant::now(),
         stop_time: time::Instant::now(),
+        runtimes: HashMap::new(),
         num_threads: threads,
         width: width,
         height: height,
@@ -42,7 +43,7 @@ pub fn create_ctx(threads: usize, width: usize, height: usize, enable_io: bool) 
 
 impl ProgressCtx {
 
-    pub fn update(&mut self, tnum: usize, row: usize, pixels: usize, rays: usize) {
+    pub fn update(&mut self, tnum: usize, row: usize, pixels: usize, rays: usize, runtimes: &HashMap<String, time::Duration>) {
 
         let elapsed = time::Instant::now() - self.start_time;
         let secs = elapsed.as_secs();
@@ -76,6 +77,10 @@ impl ProgressCtx {
                         style::Print(format!("Thread {:02}: {}", tnum, row))
                     ).unwrap();
         }
+
+        for (k, v) in runtimes {
+            *self.runtimes.entry(k.to_string()).or_default() += *v;
+        }
     }
 
     pub fn finish(&mut self) {
@@ -97,6 +102,10 @@ impl ProgressCtx {
                  (self.stop_time - self.start_time).as_millis() as f64 / 1000.,
                  (self.total_rays as f64 * 1000.) / (self.stop_time - self.start_time).as_millis() as f64
                 );
+        println!("Runtimes:");
+        for (k, v) in &self.runtimes {
+            println!("{}: {}.{:0>6}", k, v.as_secs(), v.subsec_micros());
+        }
 
     }
 
