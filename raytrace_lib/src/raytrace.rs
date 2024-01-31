@@ -1,4 +1,5 @@
 
+use core::num;
 use core::panic;
 use std::time;
 use std::fs;
@@ -10,10 +11,11 @@ use std::sync::Mutex;
 use std::sync::mpsc::{channel, Sender};
 use std::collections::{HashMap, VecDeque};
 use syscalls::{Sysno, syscall};
-use core::cmp;
+use std::f64::consts::{PI, FRAC_PI_4, FRAC_PI_2};
 
 use crate::progress;
 use crate::bitset::BitSet;
+use crate::progress::ProgressStat;
 
 #[derive(Copy, Clone, Debug)]
 #[repr(C)]
@@ -176,7 +178,6 @@ impl Ray {
                     yz_solution.unwrap()
                 } else {
                     return None;
-                    // (-1., -1.)
                 }
             }
         };
@@ -245,7 +246,6 @@ pub trait Collidable {
     fn intersects(&self, r: &Ray) -> Option<(f64, Point, CollisionFace)>;
     fn normal(&self, p: &Point, f: &CollisionFace) -> Vec3;
     fn getsurface(&self, f: &CollisionFace) -> SurfaceKind;
-    fn getid(&self) -> usize;
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -298,9 +298,6 @@ impl Collidable for Sphere {
         }
     }
 
-    fn getid(&self) -> usize {
-        self.id
-    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -438,9 +435,6 @@ impl Collidable for Disk {
             _ => panic!("Invalid face for disk")
         }
     }
-    fn getid(&self) -> usize {
-        self.id
-    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -454,18 +448,13 @@ pub struct Triangle {
     pub corners: [Vec3; 3],
     pub surface: SurfaceKind,
     pub edge_thickness: f64,
-    pub id: usize
 }
 
-pub fn make_polygon(points: &[Vec3; 3], surface: &SurfaceKind, edge_thickness: f64, id: usize) -> Triangle {
+pub fn make_triangle(points: &[Vec3; 3], surface: &SurfaceKind, edge_thickness: f64) -> Triangle {
 
     let a = points[0];
     let b = points[points.len()/3];
     let c = points[(points.len()*2)/3];
-
-    // println!("A {:?}", a);
-    // println!("B {:?}", b);
-    // println!("C {:?}", c);
 
     let ab = b.sub(&a);
     let ac = c.sub(&a);
@@ -494,27 +483,6 @@ pub fn make_polygon(points: &[Vec3; 3], surface: &SurfaceKind, edge_thickness: f
 
     let norm = sides[0].cross(&sides[1]).unit();
 
-    // let ai = incenter.sub(&a);
-    // let bi = incenter.sub(&b);
-    // let ci = incenter.sub(&c);
-
-    // let acs = ab.mult(ab.dot(&ai)/ab.len2());
-    // let abs = ac.mult(ac.dot(&ai)/ac.len2());
-    // let bcs = bc.mult(bc.dot(&bi)/bc.len2());
-
-    // let ias = bcs.sub(&bi);
-    // let ibs = abs.sub(&ai);
-    // let ics = acs.sub(&ai);
-
-    // let bounding_len2 = ai.len2().max(bi.len2()).max(ci.len2());
-
-    // let norm = ab.cross(&ac).unit();
-    // println!("\nNorms:");
-    // println!(" {:?}", norm);
-    // println!(" {:?}", corner_norms.0);
-    // println!(" {:?}", corner_norms.1);
-    // println!(" {:?}", corner_norms.2);
-
     Triangle {
         incenter: incenter,
         norm: norm,
@@ -523,8 +491,7 @@ pub fn make_polygon(points: &[Vec3; 3], surface: &SurfaceKind, edge_thickness: f
         side_lens: side_lens,
         corners: points.clone(),
         surface: *surface,
-        edge_thickness: edge_thickness,
-        id: id
+        edge_thickness: edge_thickness
     }
 }
 
@@ -549,7 +516,7 @@ impl Collidable for Triangle {
             // println!("{:?} {} {:?} {:?}", dist, side_len, side, ip);
             if dist > side_len {
                 return None;
-            } else if dist > (side_len * self.edge_thickness) {
+            } else if dist > (side_len * (1. - self.edge_thickness)) {
                 hit_edge = true;
             }
         }
@@ -609,9 +576,6 @@ impl Collidable for Triangle {
             _ => self.surface
         }
     }
-    fn getid(&self) -> usize {
-        self.id
-    }
 }
 
 
@@ -647,14 +611,143 @@ impl Collidable for CollisionObject {
         }
     }
 
-    fn getid(&self) -> usize {
-        match self {
-            CollisionObject::Sphere(s) => s.getid(),
-            CollisionObject::Triangle(t) => t.getid(),
-            CollisionObject::Disk(d) => d.getid(),
-        }
-    }
 }
+
+pub fn make_sphere(orig: &Point, r: f64, lat_lon: (usize, usize), surface: &SurfaceKind, edge_thickness: f64) -> Vec<Triangle> {
+
+    let num_lat = lat_lon.0;
+    let num_lon = lat_lon.1;
+
+    assert!(num_lat % 2 == 0);
+
+    let mut tris: Vec<Triangle> = Vec::new();
+
+    for lat_idx in 0..num_lat {
+        for lon_idx in 0..num_lon {
+
+            // let top_point = orig.add(&Vec3(r, 0., 0.));
+            // let bottom_point = orig.add(&Vec3(-1.*r, 0., 0.));
+
+            let phi1 = (if lat_idx % 2 == 0 {
+                (lat_idx as f64) / (num_lat as f64) * PI
+            } else {
+                ((lat_idx + 1) as f64) / (num_lat as f64) * PI
+            } - FRAC_PI_2) * -1.;
+            let phi23 = (if lat_idx % 2 == 0 {
+                ((lat_idx + 1) as f64) / (num_lat as f64) * PI
+            } else {
+                (lat_idx as f64) / (num_lat as f64) * PI
+            } - FRAC_PI_2) * -1.;
+
+            let smudge = if lat_idx % 2 == 0 { 0. } else { 0.5 };
+            let theta1 = ((lon_idx as f64) + smudge) / (num_lon as f64) * 2. * PI;
+            let theta2 = ((lon_idx as f64) + 0.5 + smudge) / (num_lon as f64) * 2. * PI;
+            let theta3 = ((lon_idx  as f64) - 0.5 + smudge) / (num_lon as f64) * 2. * PI;
+            let theta4 = ((lon_idx as f64) + 1.0 + smudge) / (num_lon as f64) * 2. * PI;
+
+            let phi14sin = phi1.sin();
+            let phi14cos = phi1.cos();
+            let p1 = orig.add(&Vec3(r*phi14sin,
+                                    r*phi14cos*(theta1.cos()),
+                                    r*phi14cos*(theta1.sin())));
+
+            let phi14sin = phi1.sin();
+            let phi14cos = phi1.cos();
+            let p4 = orig.add(&Vec3(r*phi14sin,
+                                    r*phi14cos*(theta4.cos()),
+                                    r*phi14cos*(theta4.sin())));
+
+            let phi23sin = phi23.sin();
+            let phi23cos = phi23.cos();
+            let p2 = orig.add(&Vec3(r*phi23sin,
+                                    r*phi23cos*(theta2.cos()),
+                                    r*phi23cos*(theta2.sin())));
+            let p3 = orig.add(&Vec3(r*phi23sin,
+                                    r*phi23cos*(theta3.cos()),
+                                    r*phi23cos*(theta3.sin())));
+
+            println!("{} {}", phi1, phi23);
+            println!("{} {} {}", theta1, theta2, theta3);
+            println!("{} {} {:?} {:?} {:?}\n", lat_idx, lon_idx, p1, p2, p3);
+            tris.push(make_triangle(&[p1, p2, p3],
+                                    surface,
+                                    edge_thickness));
+            if lat_idx != 0 && lat_idx != (num_lat - 1) {
+                tris.push(make_triangle(&[p1, p2, p4],
+                                        surface,
+                                        edge_thickness));
+            }
+        };
+    };
+
+    tris
+}
+
+pub fn make_disk(orig: &Point, norm: &Vec3, r: f64, d: f64, num_tris: usize,
+                 surface: &SurfaceKind,
+                 side_suface: &SurfaceKind, edge_thickness: f64) -> Vec<Triangle> {
+
+    let mut tris: Vec<Triangle> = Vec::new();
+
+    let norm_orth0 = norm.orthogonal().unit().mult(r);
+    let norm_orth1 = norm.cross(&norm_orth0).unit().mult(r);
+    println!("{:?} {:?} {:?}\n", norm, norm_orth0, norm_orth1);
+
+    // let smudge = 2. * PI / 1000.;
+    let smudge = 0.;
+
+    for idx in 0..num_tris {
+        let norm_pd = norm.mult(d);
+        let norm_md = norm.mult(-1.*d);
+
+
+        let theta1 = (idx as f64) / (num_tris as f64) * 2. * PI - smudge;
+        let theta2 = ((idx as f64) + 1.) / (num_tris as f64) * 2. * PI + smudge;
+
+        let theta3 = ((idx as f64) + 0.5) / (num_tris as f64) * 2. * PI - smudge;
+        let theta4 = ((idx as f64) + 1.5) / (num_tris as f64) * 2. * PI + smudge;
+
+
+        // Top Face
+        let p1p = orig.add(&norm_pd);
+
+        let p2p = orig.add(&norm_pd)
+                      .add(&norm_orth0.mult(theta1.sin()))
+                      .add(&norm_orth1.mult(theta1.cos()));
+
+        let p3p = orig.add(&norm_pd)
+                      .add(&norm_orth0.mult(theta2.sin()))
+                      .add(&norm_orth1.mult(theta2.cos()));
+
+        tris.push(make_triangle(&[p1p, p2p, p3p],
+                                surface, edge_thickness));
+
+        // Bottom Face
+        let p1m = orig.add(&norm_md);
+
+        let p2m = orig.add(&norm_md)
+                      .add(&norm_orth0.mult(theta3.sin()))
+                      .add(&norm_orth1.mult(theta3.cos()));
+
+        let p3m = orig.add(&norm_md)
+                      .add(&norm_orth0.mult(theta4.sin()))
+                      .add(&norm_orth1.mult(theta4.cos()));
+
+        // tris.push(make_triangle(&[p1m, p2m, p3m],
+        //                         surface, edge_thickness));
+        
+        // Side Face
+        tris.push(make_triangle(&[p2p, p3p, p2m],
+                                side_suface, edge_thickness));
+        tris.push(make_triangle(&[p2m, p3m, p3p],
+                                side_suface, edge_thickness));
+
+    };
+
+    tris
+
+}
+
 
 pub struct LightSource {
     pub orig: Point,
@@ -703,6 +796,130 @@ fn box_contains_point(orig: &Point, len2: f64, p: &Point) -> bool {
     op.2.abs() < len2
 }
 
+fn face_contains_triangle(p: &Point, norm: &Vec3, len2: f64, t: &Triangle) -> bool {
+    
+    // println!("{:?} {:?} {}", p, norm ,len2);
+
+    let h1 = norm.dot(&p.add(&norm.mult(len2)));
+    let h2 = t.norm.dot(&t.incenter);
+    let n1 = norm;
+    let n2 = t.norm;
+
+    let c1 = (h1 - h2*(n1.dot(&n2)))/(1. - (n1.dot(&n2))*(n1.dot(&n2)));
+    let c2 = (h2 - h1*(n1.dot(&n2)))/(1. - (n1.dot(&n2))*(n1.dot(&n2)));
+
+    let line_tmp = make_ray(&n1.mult(c1).add(&n2.mult(c2)),
+                            &n1.cross(&n2));
+
+    // Check line collision with box
+    let mut tmin = f64::MAX;
+    let mut tmax = f64::MAX;
+    if norm.0 == 0. {
+        let t1 = (p.0 - len2 - line_tmp.orig.0) * line_tmp.inv_dir.0;
+        let t2 = (p.0 + len2 - line_tmp.orig.0) * line_tmp.inv_dir.0;
+
+        // println!("0: t1 t2: {} {}", t1, t2);
+        tmin = f64::min(tmin, f64::min(t1, t2));
+    };
+
+    if norm.1 == 0. {
+        let t1 = (p.1 - len2 - line_tmp.orig.1) * line_tmp.inv_dir.1;
+        let t2 = (p.1 + len2 - line_tmp.orig.1) * line_tmp.inv_dir.1;
+
+        // println!("1: t1 t2: {} {}", t1, t2);
+        tmin = f64::min(tmin, f64::min(t1, t2));
+    };
+
+    if norm.2 == 0. {
+        let t1 = (p.2 - len2 - line_tmp.orig.2) * line_tmp.inv_dir.2;
+        let t2 = (p.2 + len2 - line_tmp.orig.2) * line_tmp.inv_dir.2;
+
+        // println!("2: t1 t2: {} {}", t1, t2);
+        tmin = f64::min(tmin, f64::min(t1, t2));
+    };
+
+    // println!("tmin: {}", tmin);
+
+    let line = if tmin > 0. {
+        line_tmp
+    } else {
+        // println!("p: {:?}", line_tmp.at(tmin * 2.));
+        make_ray(&line_tmp.at(tmin * 2.), &line_tmp.dir)
+    };
+
+    // println!("line: {:?}", line);
+
+    // Check line collision with box
+    tmin = f64::MIN;
+    tmax = f64::MAX;
+    if norm.0 == 0. {
+        let t1 = (p.0 - len2 - line.orig.0) * line.inv_dir.0;
+        let t2 = (p.0 + len2 - line.orig.0) * line.inv_dir.0;
+
+        // println!("0: t1 t2: {} {}", t1, t2);
+        tmin = f64::max(tmin, f64::min(t1, t2));
+        tmax = f64::min(tmax, f64::max(t1, t2));
+    };
+
+    if norm.1 == 0. {
+        let t1 = (p.1 - len2 - line.orig.1) * line.inv_dir.1;
+        let t2 = (p.1 + len2 - line.orig.1) * line.inv_dir.1;
+
+        // println!("1: t1 t2: {} {}", t1, t2);
+        tmin = f64::max(tmin, f64::min(t1, t2));
+        tmax = f64::min(tmax, f64::max(t1, t2));
+    };
+
+    if norm.2 == 0. {
+        let t1 = (p.2 - len2 - line.orig.2) * line.inv_dir.2;
+        let t2 = (p.2 + len2 - line.orig.2) * line.inv_dir.2;
+
+        // println!("2: t1 t2: {} {}", tmin, tmax);
+        tmin = f64::max(tmin, f64::min(t1, t2));
+        tmax = f64::min(tmax, f64::max(t1, t2));
+    };
+
+    // println!("tmin tmax: {} {}", tmin, tmax);
+
+    if tmax < tmin {
+        return false;
+    }
+
+    // Check line collision with triangle
+    let t1 = t.corners[0].sub(&line.orig).dot(&line.dir) / line.dir.len2();
+    let t2 = t.corners[1].sub(&line.orig).dot(&line.dir) / line.dir.len2();
+    let t3 = t.corners[2].sub(&line.orig).dot(&line.dir) / line.dir.len2();
+    let p1 = line.at(t1);
+    let p2 = line.at(t2);
+    let p3 = line.at(t3);
+
+    p1.sub(&t.corners[0]).dot(&p2.sub(&t.corners[1])) < 0. ||
+    p1.sub(&t.corners[0]).dot(&p3.sub(&t.corners[2])) < 0. ||
+    p2.sub(&t.corners[1]).dot(&p3.sub(&t.corners[2])) < 0.
+}
+
+#[cfg(test)]
+mod test {
+    use crate::raytrace::{Vec3, SurfaceKind, make_color, make_triangle, face_contains_triangle};
+
+    #[test]
+    fn face_collision() {
+
+        let orig = Vec3(2., 2., 2.);
+        let norm = Vec3(0., 0., -1.);
+        let len2 = 2.;
+
+        let t = make_triangle(&[Vec3(1., 0.4, 0.2),
+                                Vec3(1., 0.2, -0.3),
+                                Vec3(0.6, 0.6, -0.5)],
+                               &SurfaceKind::Solid { color: make_color((0,0,0)) },
+                               0.0);
+        
+// fn face_contains_triangle(p: &Point, norm: &Vec3, len2: f64, t: &Triangle) -> bool {
+        assert!(face_contains_triangle(&orig, &norm, len2, &t));
+
+    }
+}
 
 pub fn box_contains_polygon(orig: &Point, len2: f64, t: &Triangle) -> bool {
 
@@ -710,74 +927,72 @@ pub fn box_contains_polygon(orig: &Point, len2: f64, t: &Triangle) -> bool {
         return true;
     }
 
-    for corner in &t.corners {
-        if box_contains_point(orig, len2, &corner) {
+    // for corner in &t.corners {
+    //     if box_contains_point(orig, len2, &corner) {
+    //         return true;
+    //     }
+    // }
+
+    // Check a ray for each edge of the cube
+    let face_norms = [Vec3(1., 0., 0.),
+                      Vec3(-1., 0., 0.),
+                      Vec3(0., 1., 0.),
+                      Vec3(0., -1., 0.),
+                      Vec3(0., 0., 1.),
+                      Vec3(0., 0., -1.)];
+    for norm in face_norms {
+        if face_contains_triangle(orig, &norm, len2, t) {
             return true;
         }
     }
-    // if box_contains_point(orig, len2, &t.corners.0) ||
-    //    box_contains_point(orig, len2, &t.corners.1) ||
-    //    box_contains_point(orig, len2, &t.corners.2) {
+
+    false
+
+    // let ab_ray = make_ray(&t.corners[0], &t.corners[1].sub(&t.corners[0]));
+    // let ab_p = ab_ray.nearest_point(orig);
+    // let ap1 = ab_p.sub(&ab_ray.orig);
+    // let ab_v = ap1.dot(&ab_ray.dir);
+    // if box_contains_point(orig, len2, &ab_p) &&
+    //     ab_v >= 0. && ab_v < ab_ray.dir.len2() {
     //     return true;
     // }
 
-    let ab_ray = make_ray(&t.corners[0], &t.corners[1].sub(&t.corners[0]));
-    let ab_p = ab_ray.nearest_point(orig);
-    let ap1 = ab_p.sub(&ab_ray.orig);
-    let ab_v = ap1.dot(&ab_ray.dir);
-    if box_contains_point(orig, len2, &ab_p) &&
-        ab_v >= 0. && ab_v < ab_ray.dir.len2() {
-        return true;
-    }
+    // let ac_ray = make_ray(&t.corners[0], &t.corners[2].sub(&t.corners[0]));
+    // let ac_p = ac_ray.nearest_point(orig);
+    // let ap2 = ac_p.sub(&ac_ray.orig);
+    // let ac_v = ap2.dot(&ac_ray.dir);
+    // if box_contains_point(orig, len2, &ac_p) &&
+    //     ac_v >= 0. && ac_v < ac_ray.dir.len2() {
+    //     return true;
+    // }
 
-    let ac_ray = make_ray(&t.corners[0], &t.corners[2].sub(&t.corners[0]));
-    let ac_p = ac_ray.nearest_point(orig);
-    let ap2 = ac_p.sub(&ac_ray.orig);
-    let ac_v = ap2.dot(&ac_ray.dir);
-    if box_contains_point(orig, len2, &ac_p) &&
-        ac_v >= 0. && ac_v < ac_ray.dir.len2() {
-        return true;
-    }
+    // let bc_ray = make_ray(&t.corners[1], &t.corners[2].sub(&t.corners[1]));
+    // let bc_p = bc_ray.nearest_point(orig);
+    // let bp = bc_p.sub(&bc_ray.orig);
+    // let bc_v = bp.dot(&bc_ray.dir);
+    // if box_contains_point(orig, len2, &bc_p) &&
+    //     bc_v > 0. && bc_v < bc_ray.dir.len2() {
+    //     return true;
+    // }
 
-    let bc_ray = make_ray(&t.corners[1], &t.corners[2].sub(&t.corners[1]));
-    let bc_p = bc_ray.nearest_point(orig);
-    let bp = bc_p.sub(&bc_ray.orig);
-    let bc_v = bp.dot(&bc_ray.dir);
-    if box_contains_point(orig, len2, &bc_p) &&
-        bc_v > 0. && bc_v < bc_ray.dir.len2() {
-        return true;
-    }
+    // let edges: [(usize, usize); 12] = [
+    //     (0, 1), (0, 2), (0, 4),
+    //     (3, 1), (3, 2), (3, 7),
+    //     (5, 1), (5, 4), (5, 7),
+    //     (6, 2), (6, 4), (6, 7)
+    // ];
 
-    // Check a ray for each edge of the cube
-    let mut points = [Vec3(0., 0., 0.); 8];
-    for i in 0..8 {
-        let xoff = if (i & 1) == 0 { len2 } else {-1.*len2};
-        let yoff = if (i & 2) == 0 { len2 } else {-1.*len2};
-        let zoff = if (i & 4) == 0 { len2 } else {-1.*len2};
-        points[i] = Vec3(orig.0 + xoff, orig.1 + yoff, orig.2 + zoff);
-    }
-
-    let edges: [(usize, usize); 12] = [
-        (0, 1), (0, 2), (0, 4),
-        (3, 1), (3, 2), (3, 7),
-        (5, 1), (5, 4), (5, 7),
-        (6, 2), (6, 4), (6, 7)
-    ];
-
-    for edge in edges {
-        let edge_ray = make_ray(&points[edge.0], &points[edge.1].sub(&points[edge.0]));
-        match t.intersects(&edge_ray) {
-            Some((tt, _, __)) => {
-                if tt >= 0. && tt <= 1. {
-                    return true;
-                }
-            }
-            None => {}
-        };
-    }
-
-
-    false
+    // for edge in edges {
+    //     let edge_ray = make_ray(&points[edge.0], &points[edge.1].sub(&points[edge.0]));
+    //     match t.intersects(&edge_ray) {
+    //         Some((tt, _, __)) => {
+    //             if tt >= 0. && tt <= 1. {
+    //                 return true;
+    //             }
+    //         }
+    //         None => {}
+    //     };
+    // }
 }
 
 pub fn build_empty_box() -> BoundingBox {
@@ -1017,10 +1232,10 @@ impl BoundingBox {
 
 pub trait RayCaster: Send + Sync {
     fn project_ray(&self, r: &Ray, s: &Scene, ignore_objid: usize,
-                   depth: usize, runtimes: &mut HashMap<String, time::Duration>) -> Color;
+                   depth: usize, runtimes: &mut HashMap<String, ProgressStat>) -> Color;
     fn color_ray(&self, r: &Ray, s: &Scene, objidx: usize,
                  point: &Point, face: &CollisionFace, depth: usize,
-                 runtimes: &mut HashMap<String, time::Duration>) -> Color;
+                 runtimes: &mut HashMap<String, ProgressStat>) -> Color;
 }
 
 #[derive(Debug)]
@@ -1056,7 +1271,7 @@ unsafe impl Sync for DefaultRayCaster {}
 
 impl RayCaster for DefaultRayCaster {
     fn color_ray(&self, r: &Ray, s: &Scene, objidx: usize,
-                 point: &Point, face: &CollisionFace, depth: usize, runtimes: &mut HashMap<String, time::Duration>) -> Color {
+                 point: &Point, face: &CollisionFace, depth: usize, runtimes: &mut HashMap<String, ProgressStat>) -> Color {
 
         let shadowed = false;
         // let shadowed = if s.lights.is_some() {
@@ -1093,8 +1308,8 @@ impl RayCaster for DefaultRayCaster {
                         &self.project_ray(&lambertian_ray(point,
                                                     &s.tris[objidx].normal(point, face)),
                                     s,
-                                    s.tris[objidx].getid(),
-                                    depth + 1,
+                                    objidx,
+                                    depth - 1,
                                     runtimes),
                         alpha)
                 
@@ -1106,8 +1321,8 @@ impl RayCaster for DefaultRayCaster {
                                                     &r.dir,
                                                     scattering),
                                     s,
-                                    s.tris[objidx].getid(),
-                                    depth + 1,
+                                    objidx,
+                                    depth - 1,
                                     runtimes),
                         alpha)
             }
@@ -1115,7 +1330,7 @@ impl RayCaster for DefaultRayCaster {
     }
 
     fn project_ray(&self, r: &Ray, s: &Scene, ignore_objid: usize,
-                   depth: usize, runtimes: &mut HashMap<String, time::Duration>) -> Color {
+                   depth: usize, runstats: &mut HashMap<String, ProgressStat>) -> Color {
 
         if depth == 0 {
             return Vec3(0., 0., 0.);
@@ -1127,15 +1342,17 @@ impl RayCaster for DefaultRayCaster {
 
         let mut path: Vec<BoundingBox> = Vec::new();
         let objs = s.boxes.get_all_objects_for_ray(&s.tris, r, &mut path);
-        // objs.extend(s.otherobjs.iter().map(|o| (o.getid(), o)));
 
         let t2 = get_thread_time();
+
+        let mut objcount = 0;
 
         let intersections: Vec<(f64, Point, CollisionFace, usize)> = objs.iter().filter_map(
             |idx| {
                 if ignore_objid == idx as usize {
                     None
                 } else {
+                    objcount += 1;
                     match s.tris[idx as usize].intersects(&r) {
                         Some(p) => Some((p.0, p.1, p.2, idx as usize)),
                         None    => None
@@ -1145,8 +1362,11 @@ impl RayCaster for DefaultRayCaster {
         
         let t3 = get_thread_time();
 
-        *runtimes.entry("BoundingBox".to_string()).or_default() += time::Duration::from_nanos((t2-t1) as u64);
-        *runtimes.entry("Intersections".to_string()).or_default() += time::Duration::from_nanos((t3-t2) as u64);
+        *runstats.entry("BoundingBox".to_string()).or_insert(ProgressStat::Time(time::Duration::from_nanos(0))).as_time_mut() += time::Duration::from_nanos((t2-t1) as u64);
+        *runstats.entry("Intersections".to_string()).or_insert(ProgressStat::Time(time::Duration::from_nanos(0))).as_time_mut() += time::Duration::from_nanos((t3-t2) as u64);
+
+        *runstats.entry("Rays".to_string()).or_insert(ProgressStat::Count(0)).as_count_mut() += 1;
+        *runstats.entry("TriangleChecks".to_string()).or_insert(ProgressStat::Count(0)).as_count_mut() += objcount;
 
         if intersections.len() == 0 {
             blue
@@ -1157,7 +1377,7 @@ impl RayCaster for DefaultRayCaster {
                     let (acc_dist, _, _, _) = acc;
                     if dist < acc_dist { x } else { acc }
                 });
-                self.color_ray(r, s, *objidx, point, &face, depth, runtimes)
+                self.color_ray(r, s, *objidx, point, &face, depth, runstats)
 
         }
     }
@@ -1175,8 +1395,8 @@ pub struct Scene {
 #[derive(Clone, Copy,Debug)]
 #[repr(C)]
 pub struct Viewport {
-    width: usize,
-    height: usize,
+    pub width: usize,
+    pub height: usize,
 
     orig: Point,
     cam: Point,
@@ -1265,12 +1485,12 @@ impl Viewport {
     }
 
     fn walk_ray_set(&self, s: &Scene, rows: Arc<Mutex<VecDeque<(&mut [Color], usize)>>>,
-                    t_num: usize, progress_tx: Sender<(usize, usize, usize, usize, HashMap<String, time::Duration>)>,
+                    t_num: usize, progress_tx: Sender<(usize, usize, usize, usize, HashMap<String, ProgressStat>)>,
                     caster: &dyn RayCaster) {
 
         let mut rays_count = 0;
         let mut pixels_processed = 0;
-        let mut runtimes: HashMap<String, time::Duration> = HashMap::new();
+        let mut runstats: HashMap<String, ProgressStat> = HashMap::new();
         'threadloop: loop {
             let (data, row) = match rows.lock().unwrap().pop_front() {
                                 Some(x) => {
@@ -1280,12 +1500,12 @@ impl Viewport {
                                 };
             
             
-            let _ = progress_tx.send((t_num, row, 0, 0, runtimes.clone()));
-            runtimes.clear();
+            let _ = progress_tx.send((t_num, row, 0, 0, runstats.clone()));
+            runstats.clear();
             for y in 0..self.width {
                 let mut acc = Vec3(0., 0., 0.);
                 for _i in 0..self.samples_per_pixel {
-                    let ray_color = caster.project_ray(&self.pixel_ray((row,y)), s, 0, self.maxdepth, &mut runtimes);
+                    let ray_color = caster.project_ray(&self.pixel_ray((row,y)), s, usize::MAX, self.maxdepth, &mut runstats);
                     acc = acc.add(&ray_color);
 
                     rays_count += 1;
@@ -1293,16 +1513,16 @@ impl Viewport {
                 data[y as usize] = acc.mult(1./(self.samples_per_pixel as f64));
                 pixels_processed += 1;
                 if rays_count > 10000 {
-                    let _ = progress_tx.send((t_num, row, pixels_processed, rays_count, runtimes.clone()));
+                    let _ = progress_tx.send((t_num, row, pixels_processed, rays_count, runstats.clone()));
                     rays_count = 0;
                     pixels_processed = 0;
-                    runtimes.clear();
+                    runstats.clear();
                 }
             }
-            let _ = progress_tx.send((t_num, row, pixels_processed, rays_count, runtimes.clone()));
+            let _ = progress_tx.send((t_num, row, pixels_processed, rays_count, runstats.clone()));
             rays_count = 0;
             pixels_processed = 0;
-            runtimes.clear();
+            runstats.clear();
         }
     }
 
@@ -1330,8 +1550,8 @@ impl Viewport {
             drop(progress_tx);
             'waitloop: loop {
                 match progress_rx.recv() {
-                    Ok((t_num, row, y, rays_so_far, runtimes)) => {
-                        progress_io.update(t_num, row, y, rays_so_far, &runtimes);
+                    Ok((t_num, row, y, rays_so_far, runstats)) => {
+                        progress_io.update(t_num, row, y, rays_so_far, &runstats);
                     }
                     Err(_x) => {
                         break 'waitloop;

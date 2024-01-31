@@ -1,6 +1,6 @@
 
 
-use crate::raytrace::{Vec3, SurfaceKind, CollisionObject, make_polygon, Triangle};
+use crate::raytrace::{Vec3, SurfaceKind,  make_triangle, Triangle};
 
 use std::fs;
 
@@ -45,7 +45,7 @@ fn parse_obj_line(line: &str, ctx: &mut ObjFile) {
     }
 }
 
-pub fn parse_obj(path: &str, startid: usize, offset: &Vec3, transform: (Vec3, Vec3, Vec3), surface: &SurfaceKind) -> ObjObject {
+pub fn parse_obj(path: &str, startid: usize, offset: &Vec3, transform: (Vec3, Vec3, Vec3), surface: &SurfaceKind, edge_thickness: f64) -> Vec<Triangle> {
 
     let mut ctx = ObjFile {
         vertices: Vec::new(),
@@ -58,22 +58,17 @@ pub fn parse_obj(path: &str, startid: usize, offset: &Vec3, transform: (Vec3, Ve
     }
 
     let mut objs: Vec<Triangle> = Vec::new();
-    let mut count = 10;
 
     for face in ctx.faces {
         // let corners: [Vec3; 3] = face.corners.iter().map(|p| ctx.vertices[p-1].change_basis(transform).add(offset)).collect();
-        objs.push(make_polygon(
+        objs.push(make_triangle(
             &[ctx.vertices[face.corners[0]-1].change_basis(transform).add(offset),
               ctx.vertices[face.corners[1]-1].change_basis(transform).add(offset),
               ctx.vertices[face.corners[2]-1].change_basis(transform).add(offset)],
             surface,
-            0.95,
-            count + startid
+            edge_thickness
         ));
-        count += 1;
     }
 
-    ObjObject {
-        objs: objs
-    }
+    objs
 }
