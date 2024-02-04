@@ -5,43 +5,63 @@ use std::ops;
 #[derive(Clone, Debug)]
 pub struct BitSet {
     bits: Vec<u64>,
-    max: usize
+    max: usize,
+    bit_count: usize
 }
 
 #[derive(Debug)]
 pub struct BitSetIterator<'a> {
     bitset: &'a BitSet,
     curr_word: u64,
-    iter_word: usize
+    iter_word: usize,
+    steps: usize
 }
 
 impl BitSet {
     pub fn new(maxval: usize) -> BitSet {
         BitSet {
             bits: vec![0; (maxval + 63)/64],
-            max: maxval
+            max: maxval,
+            bit_count: 0
         }
     }
 
     pub fn insert(&mut self, val: u64) {
         let word = (val / 64) as usize;
         let bit = val % 64;
+        let preword = self.bits[word];
         self.bits[word] |= 1 << bit;
+        if preword != self.bits[word] {
+            self.bit_count += 1;
+        }
     }
 
     pub fn remove(&mut self, val: u64) {
         let word = (val / 64) as usize;
         let bit = val % 64;
+        let preword = self.bits[word];
         self.bits[word] &= !(1 << bit);
+        if preword != self.bits[word] {
+            self.bit_count -= 1;
+        }
     }
 
     pub fn iter<'a>(&'a self) -> BitSetIterator<'a> {
         BitSetIterator {
             bitset: &self,
             curr_word: self.bits[0],
-            iter_word: 0
+            iter_word: 0,
+            steps: 0
         }
     }
+
+    pub fn len(&self) -> usize {
+        self.bit_count
+    }
+}
+
+impl ExactSizeIterator for BitSetIterator<'_> {
+
 }
 
 impl Iterator for BitSetIterator<'_> {
@@ -64,10 +84,16 @@ impl Iterator for BitSetIterator<'_> {
         if self.curr_word != 0 {
             let ret = self.curr_word.trailing_zeros() as u64 + (self.iter_word as u64) * 64;
             self.curr_word &= !(1 << self.curr_word.trailing_zeros());
+            self.steps += 1;
             Some(ret)
         } else {
             None
         }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.bitset.bit_count - self.steps;
+        (n, Some(n))
     }
 }
 
@@ -98,27 +124,28 @@ impl<'a> Extend<&'a usize> for BitSet {
     }
 }
 
-impl ops::BitOr for BitSet {
-    type Output = Self;
+// TODO: Need to update with count
+// impl ops::BitOr for BitSet {
+//     type Output = Self;
 
-    fn bitor(self, rhs: Self) -> BitSet {
-        let mut n = BitSet::new(cmp::max(self.max, rhs.max));
-        let (sm_set, bg_set) = if self.max < rhs.max {
-            (&self, &rhs) 
-        } else {
-            (&rhs, &self) 
-        };
+//     fn bitor(self, rhs: Self) -> BitSet {
+//         let mut n = BitSet::new(cmp::max(self.max, rhs.max));
+//         let (sm_set, bg_set) = if self.max < rhs.max {
+//             (&self, &rhs) 
+//         } else {
+//             (&rhs, &self) 
+//         };
 
-        for idx in 0..sm_set.max {
-            n.bits[idx] = sm_set.bits[idx] | bg_set.bits[idx];
-        }
+//         for idx in 0..sm_set.max {
+//             n.bits[idx] = sm_set.bits[idx] | bg_set.bits[idx];
+//         }
 
-        for idx in sm_set.max..bg_set.max {
-            n.bits[idx] = bg_set.bits[idx];
-        }
-        n
-    }
-}
+//         for idx in sm_set.max..bg_set.max {
+//             n.bits[idx] = bg_set.bits[idx];
+//         }
+//         n
+//     }
+// }
 
 #[cfg(test)]
 mod tests {

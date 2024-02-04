@@ -1,6 +1,6 @@
 
 
-use crate::raytrace::{Vec3, SurfaceKind,  make_triangle, Triangle};
+use crate::raytrace::{Vec3, SurfaceKind,  make_vec, make_triangle, Triangle};
 
 use std::fs;
 
@@ -20,9 +20,9 @@ pub struct ObjObject {
 
 fn parse_obj_vertex(line: &str) -> Vec3 {
     let num_strs = line.split_whitespace();
-    let parts: Vec<_> = num_strs.map(|x| x.parse::<f64>().unwrap()).collect();
+    let parts: Vec<_> = num_strs.map(|x| x.parse::<f32>().unwrap()).collect();
     assert!(parts.len() == 3);
-    Vec3(parts[0], parts[1], parts[2])
+    make_vec(&[parts[0], parts[1], parts[2]])
 }
 
 fn parse_obj_face(line: &str) -> ObjPolygon {
@@ -45,7 +45,7 @@ fn parse_obj_line(line: &str, ctx: &mut ObjFile) {
     }
 }
 
-pub fn parse_obj(path: &str, startid: usize, offset: &Vec3, transform: (Vec3, Vec3, Vec3), surface: &SurfaceKind, edge_thickness: f64) -> Vec<Triangle> {
+pub fn parse_obj(path: &str, startid: usize, offset: &Vec3, scale: f32, transform: (Vec3, Vec3, Vec3), surface: &SurfaceKind, edge_thickness: f32) -> Vec<Triangle> {
 
     let mut ctx = ObjFile {
         vertices: Vec::new(),
@@ -62,9 +62,9 @@ pub fn parse_obj(path: &str, startid: usize, offset: &Vec3, transform: (Vec3, Ve
     for face in ctx.faces {
         // let corners: [Vec3; 3] = face.corners.iter().map(|p| ctx.vertices[p-1].change_basis(transform).add(offset)).collect();
         objs.push(make_triangle(
-            &[ctx.vertices[face.corners[0]-1].change_basis(transform).add(offset),
-              ctx.vertices[face.corners[1]-1].change_basis(transform).add(offset),
-              ctx.vertices[face.corners[2]-1].change_basis(transform).add(offset)],
+            &[ctx.vertices[face.corners[0]-1].mult(scale).change_basis(transform).add(offset),
+              ctx.vertices[face.corners[1]-1].mult(scale).change_basis(transform).add(offset),
+              ctx.vertices[face.corners[2]-1].mult(scale).change_basis(transform).add(offset)],
             surface,
             edge_thickness
         ));

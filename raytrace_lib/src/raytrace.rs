@@ -1,6 +1,8 @@
 
 use core::num;
 use core::panic;
+use core::slice::SlicePattern;
+use std::alloc::alloc;
 use std::time;
 use std::fs;
 use std::io;
@@ -11,72 +13,97 @@ use std::sync::Mutex;
 use std::sync::mpsc::{channel, Sender};
 use std::collections::{HashMap, VecDeque};
 use syscalls::{Sysno, syscall};
-use std::f64::consts::{PI, FRAC_PI_4, FRAC_PI_2};
+use std::f32::consts::{PI, FRAC_PI_4, FRAC_PI_2};
+use std::simd::*;
+use std::simd::num::SimdFloat;
+use std::mem::size_of;
+use std::alloc::Allocator;
 
 use crate::progress;
 use crate::bitset::BitSet;
 use crate::progress::ProgressStat;
+use crate::bumpalloc::BumpAllocator;
 
-#[derive(Copy, Clone, Debug)]
-#[repr(C)]
-pub struct Vec3(pub f64, pub f64, pub f64);
+
+#[derive(Clone, Copy, Debug)]
+pub struct Vec3 {
+    v: Simd<f32, 4>
+}
 pub type Point = Vec3;
 pub type Color = Vec3;
 
+pub fn make_vec(v: &[f32; 3]) -> Vec3 {
+    Vec3 {
+        v: [v[0], v[1], v[2], 0.].into()
+    }
+}
+
 impl Vec3 {
+    #[inline(always)]
     pub fn add(&self, other: &Vec3) -> Vec3 {
-        Vec3(self.0 + other.0,
-             self.1 + other.1,
-             self.2 + other.2,
-        )
+        Vec3 {
+            v: self.v + other.v
+        }
     }
 
+    #[inline(always)]
     pub fn sub(&self, other: &Vec3) -> Vec3 {
-        Vec3(self.0 - other.0,
-             self.1 - other.1,
-             self.2 - other.2)
+        Vec3 {
+            v: self.v - other.v
+        }
     }
 
-    pub fn mult(&self, a: f64) -> Vec3 {
-        Vec3(self.0 * a,
-             self.1 * a, 
-             self.2 * a
-        )
+    #[inline(always)]
+    pub fn mult(&self, a: f32) -> Vec3 {
+        Vec3 {
+             v: f32x4::from_array(self.v.to_array().map(|x| x * a))
+        }
     }
 
-    pub fn len2(&self) -> f64 {
-        self.0*self.0 + self.1*self.1 + self.2*self.2
+    #[inline(always)]
+    pub fn len2(&self) -> f32 {
+        (self.v * self.v).reduce_sum()
     }
 
-    pub fn len(&self) -> f64 {
+    #[inline(always)]
+    pub fn len(&self) -> f32 {
         self.len2().sqrt()
     }
 
-    pub fn dot(&self, other: &Vec3) -> f64 {
-        self.0 * other.0 +
-        self.1 * other.1 +
-        self.2 * other.2
+    #[inline(always)]
+    pub fn dot(&self, other: &Vec3) -> f32 {
+        (self.v * other.v).reduce_sum()
     }
 
+    #[inline(always)]
     pub fn cross(&self, other: &Vec3) -> Vec3 {
-        Vec3(self.1 * other.2 - self.2 * other.1,
-             self.2 * other.0 - self.0 * other.2,
-             self.0 * other.1 - self.1 * other.0
-        )
+
+        let self_1 = simd_swizzle!(self.v, [1, 2, 0, 3]);
+        let self_2 = simd_swizzle!(self.v, [2, 0, 1, 3]);
+        let other_1 = simd_swizzle!(other.v, [1, 2, 0, 3]);
+        let other_2 = simd_swizzle!(other.v, [2, 0, 1, 3]);
+
+        Vec3 {
+            v: self_1 * other_2 - self_2 * other_1
+        }
+        // make_vec(&[self.v[1] * other.v[2] - self.v[2] * other.v[1],
+        //            self.v[2] * other.v[0] - self.v[0] * other.v[2],
+        //            self.v[0] * other.v[1] - self.v[1] * other.v[0]])
     }
 
+    #[inline(always)]
     pub fn unit(&self) -> Vec3 {
         let res = self.mult(1./self.len());
         res
     }
 
     pub fn orthogonal(&self) -> Vec3 {
-        if self.0.abs() > 0.1 {
-            Vec3(-1.*(self.1 + self.2) / self.0, 1., 1.).unit()
-        } else if self.1.abs() > 0.1 {
-            Vec3(1., -1.*(self.0 + self.2) / self.1, 1.).unit()
-        } else if self.2.abs() > 0.1 {
-            Vec3(1., 1., -1.*(self.0 + self.1) / self.2,).unit()
+        if self.v[0].abs() > 0.1 {
+            make_vec(&[-1.*(self.v[1] + self.v[2]) / self.v[0], 1., 1.]).unit()
+        } else if self.v[1].abs() > 0.1 {
+            make_vec(&[1., -1.*(self.v[0] + self.v[2]) / self.v[1], 1.]).unit()
+        } else if self.v[2].abs() > 0.1 {
+            make_vec(&[1., 1., -1.*(self.v[0] + self.v[1]) / self.v[2]]).unit()
         } else {
             self.unit().orthogonal()
         }
@@ -90,29 +117,72 @@ impl Vec3 {
     }
 
     pub fn change_basis(&self, b: (Vec3, Vec3, Vec3)) -> Vec3 {
-        Vec3(Vec3(b.0.0, b.0.1, b.0.2).dot(self),
-             Vec3(b.1.0, b.1.1, b.1.2).dot(self),
-             Vec3(b.2.0, b.2.1, b.2.2).dot(self)
-        )
+        make_vec(&[make_vec(&[b.0.v[0], b.0.v[1], b.0.v[2]]).dot(self),
+                   make_vec(&[b.1.v[0], b.1.v[1], b.1.v[2]]).dot(self),
+                   make_vec(&[b.2.v[0], b.2.v[1], b.2.v[2]]).dot(self)])
+        // Vec3(Vec3(b.0.0, b.0.1, b.0.2).dot(self),
+        //      Vec3(b.1.0, b.1.1, b.1.2).dot(self),
+        //      Vec3(b.2.0, b.2.1, b.2.2).dot(self))
     }
 }
 
+fn vec3_dot_array(a_list: &[Vec3], b_list: &[Vec3]) -> Vec<f32> {
+    a_list.iter().zip(b_list).map(|(a, b)| a.dot(b)).collect()
+}
+
+fn vec3_dot_array_single(a_list: &[Vec3], b: &Vec3) -> Vec<f32> {
+    a_list.iter().map(|a| a.dot(b)).collect()
+}
+
+fn vec3_add_array(a_list: &[Vec3], b_list: &[Vec3]) -> Vec<Vec3> {
+    a_list.iter().zip(b_list).map(|(a, b)| a.add(b)).collect()
+}
+
+fn vec3_add_array_single(a_list: &[Vec3], b: &Vec3) -> Vec<Vec3> {
+    a_list.iter().map(|a| a.add(b)).collect()
+}
+
+fn vec3_sub_array(a_list: &[Vec3], b_list: &[Vec3]) -> Vec<Vec3> {
+    a_list.iter().zip(b_list).map(|(a, b)| a.sub(b)).collect()
+}
+
+fn vec3_sub_array_single(a_list: &[Vec3], b: &Vec3) -> Vec<Vec3> {
+    a_list.iter().map(|a| a.sub(b)).collect()
+}
+
+fn vec3_mult_array(a_list: &[Vec3], b_list: &[f32]) -> Vec<Vec3> {
+    a_list.iter().zip(b_list).map(|(a, b)| a.mult(*b)).collect()
+}
+
+fn vec3_mult_array_single(a_list: &[Vec3], b: f32) -> Vec<Vec3> {
+    a_list.iter().map(|a| a.mult(b)).collect()
+}
+
+fn vec3_len2_array(a_list: &[Vec3]) -> Vec<f32> {
+    a_list.iter().map(|a| a.len2()).collect()
+}
+
+fn vec3_len_array(a_list: &[Vec3]) -> Vec<f32> {
+    a_list.iter().map(|a| a.len()).collect()
+}
+
+
 pub fn make_color(color: (u8, u8, u8)) -> Color {
-    Vec3((color.0 as f64) / 255.,
-         (color.1 as f64) / 255.,
-         (color.2 as f64) / 255.)
+    make_vec(&[(color.0 as f32) / 255.,
+               (color.1 as f32) / 255.,
+               (color.2 as f32) / 255.])
 }
 
 pub fn random_color() -> Color {
-    Vec3(rand::random::<f64>(),
-         rand::random::<f64>(),
-         rand::random::<f64>())
+    make_color((rand::random::<u8>(),
+                rand::random::<u8>(),
+                rand::random::<u8>()))
 }
 
 fn random_vec() -> Vec3 {
-    Vec3(rand::random::<f64>() - 0.5,
-         rand::random::<f64>() - 0.5,
-         rand::random::<f64>() - 0.5).unit()
+    make_vec(&[rand::random::<f32>() - 0.5,
+               rand::random::<f32>() - 0.5,
+               rand::random::<f32>() - 0.5]).unit()
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -127,32 +197,29 @@ pub fn make_ray(orig: &Point, dir: &Vec3) -> Ray {
     Ray {
         orig: *orig,
         dir: *dir,
-        inv_dir: Vec3(1./dir.0,
-                      1./dir.1,
-                      1./dir.2)
+        inv_dir: make_vec(&[1./dir.v[0],
+                            1./dir.v[1],
+                            1./dir.v[2]])
     }
 }
 
-fn ray_intersect_helper(a: &Point, v: &Vec3, b: &Point, u:&Vec3) -> Option<(f64, f64)> {
-    let det = u.0 * v.1 - u.1 * v.0;
+fn ray_intersect_helper(a: &Point, v: &Vec3, b: &Point, u:&Vec3) -> Option<(f32, f32)> {
+    let det = u.v[0] * v.v[1] - u.v[1] * v.v[0];
     if det.abs() < 0.0001 {
         return None;
     }
 
-    let dx = b.0 - a.0;
-    let dy = b.1 - a.1;
+    let dx = b.v[0] - a.v[0];
+    let dy = b.v[1] - a.v[1];
     Some((
-        (dy * u.0 - dx * u.1) / det,
-        (dy * v.0 - dx * v.1) / det
+        (dy * u.v[0] - dx * u.v[1]) / det,
+        (dy * v.v[0] - dx * v.v[1]) / det
     ))
 }
 
 impl Ray {
-    fn at(&self, t: f64) -> Point {
-        Vec3(self.orig.0 + self.dir.0*t,
-             self.orig.1 + self.dir.1*t,
-             self.orig.2 + self.dir.2*t
-        )
+    fn at(&self, t: f32) -> Point {
+        self.dir.mult(t).add(&self.orig)
     }
 
     fn intersect(&self, r: &Ray) -> Option<Point> {
@@ -161,18 +228,18 @@ impl Ray {
             xy_solution.unwrap()
         } else {
             let xz_solution = ray_intersect_helper(
-                &Vec3(self.orig.0, self.orig.2, self.orig.1),
-                &Vec3(self.dir.0, self.dir.2, self.dir.1),
-                &Vec3(r.orig.0, r.orig.2, r.orig.1),
-                &Vec3(r.dir.0, r.dir.2, r.dir.1));
+                &make_vec(&[self.orig.v[0], self.orig.v[2], self.orig.v[1]]),
+                &make_vec(&[self.dir.v[0], self.dir.v[2], self.dir.v[1]]),
+                &make_vec(&[r.orig.v[0], r.orig.v[2], r.orig.v[1]]),
+                &make_vec(&[r.dir.v[0], r.dir.v[2], r.dir.v[1]]));
             if xz_solution.is_some() {
                 xz_solution.unwrap()
             } else {
                 let yz_solution = ray_intersect_helper(
-                &Vec3(self.orig.1, self.orig.2, self.orig.0),
-                &Vec3(self.dir.1, self.dir.2, self.dir.0),
-                &Vec3(r.orig.1, r.orig.2, r.orig.0),
-                &Vec3(r.dir.1, r.dir.2, r.dir.0));
+                &make_vec(&[self.orig.v[1], self.orig.v[2], self.orig.v[0]]),
+                &make_vec(&[self.dir.v[1], self.dir.v[2], self.dir.v[0]]),
+                &make_vec(&[r.orig.v[1], r.orig.v[2], r.orig.v[0]]),
+                &make_vec(&[r.dir.v[1], r.dir.v[2], r.dir.v[0]]));
 
                 if yz_solution.is_some() {
                     yz_solution.unwrap()
@@ -202,7 +269,7 @@ impl Ray {
     }
 }
 
-fn reflect_ray(orig: &Point, norm: &Vec3, dir: &Vec3, fuzz: f64) -> Ray {
+fn reflect_ray(orig: &Point, norm: &Vec3, dir: &Vec3, fuzz: f32) -> Ray {
 
     let ddot = dir.dot(norm).abs();
     let dir_p = norm.mult(ddot);
@@ -221,15 +288,15 @@ fn lambertian_ray(orig: &Point, norm: &Vec3) -> Ray {
     make_ray(orig, &norm.add(&rand_vec))
 }
 
-fn mix_color(c1: &Color, c2: &Color, a: f64) -> Color {
+fn mix_color(c1: &Color, c2: &Color, a: f32) -> Color {
     c1.mult(1. - a).add(&c2.mult(a))
 }
 
 #[derive(Copy, Clone, Debug)]
 pub enum SurfaceKind {
     Solid { color: Color },
-    Matte { color: Color, alpha: f64},
-    Reflective { scattering: f64, color: Color, alpha: f64},
+    Matte { color: Color, alpha: f32},
+    Reflective { scattering: f32, color: Color, alpha: f32},
 }
 
 #[derive(Debug, PartialEq)]
@@ -243,198 +310,9 @@ pub enum CollisionFace {
 }
 
 pub trait Collidable {
-    fn intersects(&self, r: &Ray) -> Option<(f64, Point, CollisionFace)>;
+    fn intersects(&self, r: &Ray) -> Option<(f32, Point, CollisionFace)>;
     fn normal(&self, p: &Point, f: &CollisionFace) -> Vec3;
     fn getsurface(&self, f: &CollisionFace) -> SurfaceKind;
-}
-
-#[derive(Copy, Clone, Debug)]
-pub struct Sphere {
-    pub orig: Point,
-    pub r: f64,
-    pub surface: SurfaceKind,
-    pub id: usize
-}
-
-impl Collidable for Sphere {
-    fn intersects(&self, r: &Ray) -> Option<(f64, Point, CollisionFace)> {
-        let a = r.dir.dot(&r.dir);
-        let cp_v = r.orig.sub(&self.orig);
-        let b = r.dir.mult(2.).dot(&cp_v);
-        let c = cp_v.dot(&cp_v) - self.r*self.r;
-
-        let disc = b*b - 4.*a*c;
-        if disc < 0. {
-            None
-        } else {
-            let tp = (-1. * b + disc.sqrt()) / (2. * a);
-            let tm = (-1. * b - disc.sqrt()) / (2. * a);
-
-            if tp < 0. && tm < 0. {
-                None
-            } else {
-                let t = if tp < 0. { tm }
-                        else if tm < 0. { tp }
-                        else if tm < tp { tm }
-                        else { tm };
-                
-                let point = r.at(t);
-                Some((t, point, CollisionFace::Front))
-            }
-        }
-    }
-
-    fn normal(&self, p: &Point, f: &CollisionFace) -> Vec3 {
-        match f {
-            CollisionFace::Front => p.sub(&self.orig).unit(),
-            _ => panic!("Invalid face for Sphere")
-        }
-    }
-
-    fn getsurface(&self, f: &CollisionFace) -> SurfaceKind {
-        match f {
-            CollisionFace::Front => self.surface,
-            _ => panic!("Invalid face for Sphere")
-        }
-    }
-
-}
-
-#[derive(Copy, Clone, Debug)]
-pub struct Disk {
-    pub orig: Point,
-    pub norm: Vec3,
-    pub r: f64,
-    pub depth: f64,
-    pub surface: SurfaceKind,
-    pub side_surface: SurfaceKind,
-    pub id: usize
-}
-
-impl Collidable for Disk {
-    fn intersects(&self, r: &Ray) -> Option<(f64, Point, CollisionFace)> {
-
-        // t = -1 * (norm * (orig - Rorig)) / (norm * Rdir)
-        let surf_front = self.orig.add(&self.norm.mult(self.depth));
-        let t_front = self.norm.dot(&surf_front.sub(&r.orig)) / self.norm.dot(&r.dir);
-        let p_front = r.at(t_front);
-
-        let surf_back = self.orig.sub(&self.norm.mult(self.depth));
-        let t_back = self.norm.dot(&surf_back.sub(&r.orig)) / self.norm.dot(&r.dir);
-        let p_back = r.at(t_back);
-
-        // Hit in negative time, ignore
-        if t_back < 0. && t_front < 0. {
-            return None;
-        }
-
-        let hit_front = p_front.sub(&surf_front).len() < self.r &&
-                        t_front >= 0.;
-        let hit_back = p_back.sub(&surf_back).len() < self.r &&
-                       t_back >= 0.;
-
-        if hit_front && hit_back {
-            // Hit both faces. Choose the lowest positive face
-            if t_front < t_back {
-                Some((t_front, p_front, CollisionFace::Front))
-            } else {
-                Some((t_back, p_back, CollisionFace::Back))
-            }
-        } else {
-            // hit one or no faces. This means it could go through
-            // the edge of the disk
-
-            let n_basis = self.norm.basis();
-
-            let r_n_temp = make_ray(&r.orig.sub(&self.orig).change_basis(n_basis),
-                                    &r.dir.change_basis(n_basis));
-            let r_n = make_ray(&Vec3(r_n_temp.orig.0, r_n_temp.orig.1, 0.),
-                               &Vec3(r_n_temp.dir.0, r_n_temp.dir.1, 0.));
-
-            let a = r_n.dir.dot(&r_n.dir);
-            let b = 2. * r_n.orig.dot(&r_n.dir);
-            let c = r_n.orig.dot(&r_n.orig) - self.r*self.r;
-
-            let discriminate = b*b - 4.*a*c;
-
-            let (hit_side, hit_side_t) =
-                if discriminate >= 0. {
-                    let tp = (-1. * b + discriminate.sqrt()) / (2. * a);
-                    let tm = (-1. * b - discriminate.sqrt()) / (2. * a);
-
-                    let kp = self.orig.sub(&r.at(tp)).dot(&self.norm);
-                    let km = self.orig.sub(&r.at(tm)).dot(&self.norm);
-
-                    let valid_p = tp > 0. && kp.abs() < self.depth;
-                    let valid_m = tm > 0. && km.abs() < self.depth;
-
-                    if !valid_p && !valid_m {
-                        (false, 0.)
-                    } else if !valid_p {
-                        (true, tm)
-                    } else if !valid_m {
-                        (true, tp)
-                    } else {
-                        if tm < tp {
-                            (true, tm)
-                        } else {
-                            (true, tp)
-                        }
-                    }
-                } else {
-                    (false, 0.)
-                };
-
-            let (hit_face, hit_face_t) =
-                if hit_front {
-                    (true, t_front)
-                } else if hit_back {
-                    (true, t_back)
-                } else {
-                    (false, 0.)
-                };
-        
-            if hit_face && hit_side {
-                if hit_face_t < hit_side_t {
-                    Some((hit_face_t,
-                        r.at(hit_face_t),
-                        if hit_front { CollisionFace::Front } else { CollisionFace::Back}))
-                } else {
-                    Some((hit_side_t, r.at(hit_side_t), CollisionFace::Side))
-                }
-            } else if hit_face {
-                Some((hit_face_t,
-                        r.at(hit_face_t),
-                        if hit_front { CollisionFace::Front } else { CollisionFace::Back}))
-            } else if hit_side {
-                Some((hit_side_t, r.at(hit_side_t), CollisionFace::Side))
-            } else {
-                None
-            }
-        }
-    }
-
-    fn normal(&self, p: &Point, f: &CollisionFace) -> Vec3 {
-        // Note: This actually depends on the direction the ray came from
-        match f {
-            CollisionFace::Front => self.norm,
-            CollisionFace::Back => self.norm.mult(-1.),
-            CollisionFace::Side => {
-                let k = self.orig.sub(p).dot(&self.norm);
-                let p2 = p.add(&self.norm.mult(k));
-                p2.sub(&self.orig).unit()
-            },
-            _ => panic!("Invalid face for disk")
-        }
-    }
-    fn getsurface(&self, f: &CollisionFace) -> SurfaceKind {
-        match f {
-            CollisionFace::Front => self.surface,
-            CollisionFace::Back => self.surface,
-            CollisionFace::Side => self.side_surface,
-            _ => panic!("Invalid face for disk")
-        }
-    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -443,14 +321,14 @@ pub struct Triangle {
     pub incenter: Point,
     pub norm: Vec3,
     pub sides: [Vec3; 3],
-    pub side_lens: [f64; 3],
+    pub side_lens: [f32; 3],
     // sides: [(Vec3, f64); 3],
     pub corners: [Vec3; 3],
     pub surface: SurfaceKind,
-    pub edge_thickness: f64,
+    pub edge_thickness: f32,
 }
 
-pub fn make_triangle(points: &[Vec3; 3], surface: &SurfaceKind, edge_thickness: f64) -> Triangle {
+pub fn make_triangle(points: &[Vec3; 3], surface: &SurfaceKind, edge_thickness: f32) -> Triangle {
 
     let a = points[0];
     let b = points[points.len()/3];
@@ -469,7 +347,7 @@ pub fn make_triangle(points: &[Vec3; 3], surface: &SurfaceKind, edge_thickness: 
 
     let incenter = bac_bi_ray.intersect(&abc_bi_ray).unwrap();
 
-    let mut sides = [Vec3(0.,0.,0.); 3];
+    let mut sides = [make_vec(&[0., 0., 0.]); 3];
     let mut side_lens = [0.; 3];
     for idx in 0..points.len() {
         let vedge = points[(idx+1)%points.len()].sub(&points[idx]);
@@ -495,8 +373,115 @@ pub fn make_triangle(points: &[Vec3; 3], surface: &SurfaceKind, edge_thickness: 
     }
 }
 
+#[inline(never)]
+pub fn intersect_triangle_list(r: &Ray, objs: BitSet, tris: &[Triangle], allocator: &dyn Allocator) -> Vec<Option<(f32, Point, CollisionFace, usize)>> {
+
+
+    let mut tri_norms = Vec::with_capacity_in(objs.len(), allocator);
+    tri_norms.extend(objs.iter().map(|i| tris[i as usize].norm));
+
+    let mut tri_incenters = Vec::with_capacity_in(objs.len(), allocator); 
+    tri_incenters.extend(objs.iter().map(|i| tris[i as usize].incenter));
+
+    let mut tri_sides = Vec::with_capacity_in(objs.len(), allocator);
+    tri_sides.extend(objs.iter().map(|i| tris[i as usize].sides));
+
+    let mut tri_sidelens = Vec::with_capacity_in(objs.len(), allocator);
+    tri_sidelens.extend(objs.iter().map(|i| tris[i as usize].side_lens));
+
+    let mut tri_edgets = Vec::with_capacity_in(objs.len(), allocator);
+    tri_edgets.extend(objs.iter().map(|i| tris[i as usize].edge_thickness));
+
+    let tnum_list = vec3_dot_array(tri_norms.as_slice(), vec3_sub_array_single(tri_incenters.as_slice(), &r.orig).as_slice());
+    let tden_list = vec3_dot_array_single(tri_norms.as_slice(), &r.dir);
+
+    let mut t_list = Vec::with_capacity_in(objs.len(), allocator);
+    t_list.extend(tnum_list.iter().zip(tden_list).map(|(tnum, tden)|  tnum / tden));
+
+    let mut p_list = Vec::with_capacity_in(objs.len(), allocator);
+    p_list.extend(t_list.iter().map(|t| r.at(*t)));
+
+    let ip_list = vec3_sub_array(p_list.as_slice(), &tri_incenters.as_slice());
+
+    let mut dists_list = Vec::with_capacity_in(objs.len(), allocator);
+    dists_list.extend(ip_list.iter().zip(tri_sides).map(
+        |(ip, sides)| [ ip.dot(&sides[0]),
+                        ip.dot(&sides[1]),
+                        ip.dot(&sides[2])]));
+
+
+    let mut out_vec = Vec::with_capacity(objs.len());
+
+    for i in 0..objs.len() {
+
+        let dists = dists_list[i];
+        let sidelens = tri_sidelens[i];
+        let edgethickness = tri_edgets[i];
+        let norm = tri_norms[i];
+        let p = p_list[i];
+        let t = t_list[i];
+
+        let front = r.dir.dot(&norm) > 0.;
+        out_vec.push(if t < 0. {
+            None
+        } else if dists[0] > sidelens[0] ||
+                    dists[1] > sidelens[1] ||
+                    dists[2] > sidelens[2] {
+            None
+        } else if dists[0] > (sidelens[0] * (1. - edgethickness)) ||
+                    dists[1] > (sidelens[1] * (1. - edgethickness)) ||
+                    dists[2] > (sidelens[2] * (1. - edgethickness)) {
+            if front {
+                Some((t, p, CollisionFace::EdgeFront, i as usize))
+            } else {
+                Some((t, p, CollisionFace::EdgeBack, i as usize))
+            }
+        } else {
+            if front {
+                Some((t, p, CollisionFace::Front, i as usize))
+            } else {
+                Some((t, p, CollisionFace::Back, i as usize))
+            }
+        });
+    }
+
+    out_vec
+    
+    // dists_list.iter().zip(tri_sidelens)
+    //                                 .zip(tri_edgets)
+    //                                 .zip(tri_norms)
+    //                                 .zip(p_list)
+    //                                 .zip(t_list)
+    //                                 .zip(objs.iter()).map(
+    //     |((((((dists, sidelens), edgethickness), norm), p), t), idx)| {
+    //         let front = r.dir.dot(&norm) > 0.;
+    //         if t < 0. {
+    //             None
+    //         } else if dists[0] > sidelens[0] ||
+    //                   dists[1] > sidelens[1] ||
+    //                   dists[2] > sidelens[2] {
+    //             None
+    //         } else if dists[0] > (sidelens[0] * (1. - edgethickness)) ||
+    //                   dists[1] > (sidelens[1] * (1. - edgethickness)) ||
+    //                   dists[2] > (sidelens[2] * (1. - edgethickness)) {
+    //             if front {
+    //                 Some((t, p, CollisionFace::EdgeFront, idx as usize))
+    //             } else {
+    //                 Some((t, p, CollisionFace::EdgeBack, idx as usize))
+    //             }
+    //         } else {
+    //             if front {
+    //                 Some((t, p, CollisionFace::Front, idx as usize))
+    //             } else {
+    //                 Some((t, p, CollisionFace::Back, idx as usize))
+    //             }
+    //         }
+    //     }).collect()
+    
+}
+
 impl Collidable for Triangle {
-    fn intersects(&self, r: &Ray) -> Option<(f64, Point, CollisionFace)> {
+    fn intersects(&self, r: &Ray) -> Option<(f32, Point, CollisionFace)> {
 
         let t = self.norm.dot(&self.incenter.sub(&r.orig)) / self.norm.dot(&r.dir);
         if t < 0. {
@@ -579,41 +564,41 @@ impl Collidable for Triangle {
 }
 
 
-#[derive(Clone, Debug)]
-pub enum CollisionObject {
-    Sphere(Sphere),
-    Triangle(Triangle),
-    Disk(Disk),
-}
+// #[derive(Clone, Debug)]
+// pub enum CollisionObject {
+//     Sphere(Sphere),
+//     Triangle(Triangle),
+//     Disk(Disk),
+// }
 
-impl Collidable for CollisionObject {
-    fn intersects(&self, r: &Ray) -> Option<(f64, Point, CollisionFace)> {
-        match self {
-            CollisionObject::Sphere(s) => s.intersects(r),
-            CollisionObject::Triangle(t) => t.intersects(r),
-            CollisionObject::Disk(d) => d.intersects(r),
-        }
-    }
+// impl Collidable for CollisionObject {
+//     fn intersects(&self, r: &Ray) -> Option<(f64, Point, CollisionFace)> {
+//         match self {
+//             CollisionObject::Sphere(s) => s.intersects(r),
+//             CollisionObject::Triangle(t) => t.intersects(r),
+//             CollisionObject::Disk(d) => d.intersects(r),
+//         }
+//     }
 
-    fn normal(&self, p: &Point, f: &CollisionFace) -> Vec3 {
-        match self {
-            CollisionObject::Sphere(s) => s.normal(p, f),
-            CollisionObject::Triangle(t) => t.normal(p, f),
-            CollisionObject::Disk(d) => d.normal(p, f),
-        }
-    }
+//     fn normal(&self, p: &Point, f: &CollisionFace) -> Vec3 {
+//         match self {
+//             CollisionObject::Sphere(s) => s.normal(p, f),
+//             CollisionObject::Triangle(t) => t.normal(p, f),
+//             CollisionObject::Disk(d) => d.normal(p, f),
+//         }
+//     }
 
-    fn getsurface(&self, f: &CollisionFace) -> SurfaceKind {
-        match self {
-            CollisionObject::Sphere(s) => s.getsurface(f),
-            CollisionObject::Triangle(t) => t.getsurface(f),
-            CollisionObject::Disk(d) => d.getsurface(f),
-        }
-    }
+//     fn getsurface(&self, f: &CollisionFace) -> SurfaceKind {
+//         match self {
+//             CollisionObject::Sphere(s) => s.getsurface(f),
+//             CollisionObject::Triangle(t) => t.getsurface(f),
+//             CollisionObject::Disk(d) => d.getsurface(f),
+//         }
+//     }
 
-}
+// }
 
-pub fn make_sphere(orig: &Point, r: f64, lat_lon: (usize, usize), surface: &SurfaceKind, edge_thickness: f64) -> Vec<Triangle> {
+pub fn make_sphere(orig: &Point, r: f32, lat_lon: (usize, usize), surface: &SurfaceKind, edge_thickness: f32) -> Vec<Triangle> {
 
     let num_lat = lat_lon.0;
     let num_lon = lat_lon.1;
@@ -629,42 +614,42 @@ pub fn make_sphere(orig: &Point, r: f64, lat_lon: (usize, usize), surface: &Surf
             // let bottom_point = orig.add(&Vec3(-1.*r, 0., 0.));
 
             let phi1 = (if lat_idx % 2 == 0 {
-                (lat_idx as f64) / (num_lat as f64) * PI
+                (lat_idx as f32) / (num_lat as f32) * PI
             } else {
-                ((lat_idx + 1) as f64) / (num_lat as f64) * PI
+                ((lat_idx + 1) as f32) / (num_lat as f32) * PI
             } - FRAC_PI_2) * -1.;
             let phi23 = (if lat_idx % 2 == 0 {
-                ((lat_idx + 1) as f64) / (num_lat as f64) * PI
+                ((lat_idx + 1) as f32) / (num_lat as f32) * PI
             } else {
-                (lat_idx as f64) / (num_lat as f64) * PI
+                (lat_idx as f32) / (num_lat as f32) * PI
             } - FRAC_PI_2) * -1.;
 
             let smudge = if lat_idx % 2 == 0 { 0. } else { 0.5 };
-            let theta1 = ((lon_idx as f64) + smudge) / (num_lon as f64) * 2. * PI;
-            let theta2 = ((lon_idx as f64) + 0.5 + smudge) / (num_lon as f64) * 2. * PI;
-            let theta3 = ((lon_idx  as f64) - 0.5 + smudge) / (num_lon as f64) * 2. * PI;
-            let theta4 = ((lon_idx as f64) + 1.0 + smudge) / (num_lon as f64) * 2. * PI;
+            let theta1 = ((lon_idx as f32) + smudge) / (num_lon as f32) * 2. * PI;
+            let theta2 = ((lon_idx as f32) + 0.5 + smudge) / (num_lon as f32) * 2. * PI;
+            let theta3 = ((lon_idx  as f32) - 0.5 + smudge) / (num_lon as f32) * 2. * PI;
+            let theta4 = ((lon_idx as f32) + 1.0 + smudge) / (num_lon as f32) * 2. * PI;
 
             let phi14sin = phi1.sin();
             let phi14cos = phi1.cos();
-            let p1 = orig.add(&Vec3(r*phi14sin,
-                                    r*phi14cos*(theta1.cos()),
-                                    r*phi14cos*(theta1.sin())));
+            let p1 = orig.add(&make_vec(&[r*phi14sin,
+                                          r*phi14cos*(theta1.cos()),
+                                          r*phi14cos*(theta1.sin())]));
 
             let phi14sin = phi1.sin();
             let phi14cos = phi1.cos();
-            let p4 = orig.add(&Vec3(r*phi14sin,
-                                    r*phi14cos*(theta4.cos()),
-                                    r*phi14cos*(theta4.sin())));
+            let p4 = orig.add(&make_vec(&[r*phi14sin,
+                                          r*phi14cos*(theta4.cos()),
+                                          r*phi14cos*(theta4.sin())]));
 
             let phi23sin = phi23.sin();
             let phi23cos = phi23.cos();
-            let p2 = orig.add(&Vec3(r*phi23sin,
-                                    r*phi23cos*(theta2.cos()),
-                                    r*phi23cos*(theta2.sin())));
-            let p3 = orig.add(&Vec3(r*phi23sin,
-                                    r*phi23cos*(theta3.cos()),
-                                    r*phi23cos*(theta3.sin())));
+            let p2 = orig.add(&make_vec(&[r*phi23sin,
+                                          r*phi23cos*(theta2.cos()),
+                                          r*phi23cos*(theta2.sin())]));
+            let p3 = orig.add(&make_vec(&[r*phi23sin,
+                                          r*phi23cos*(theta3.cos()),
+                                          r*phi23cos*(theta3.sin())]));
 
             println!("{} {}", phi1, phi23);
             println!("{} {} {}", theta1, theta2, theta3);
@@ -683,9 +668,9 @@ pub fn make_sphere(orig: &Point, r: f64, lat_lon: (usize, usize), surface: &Surf
     tris
 }
 
-pub fn make_disk(orig: &Point, norm: &Vec3, r: f64, d: f64, num_tris: usize,
+pub fn make_disk(orig: &Point, norm: &Vec3, r: f32, d: f32, num_tris: usize,
                  surface: &SurfaceKind,
-                 side_suface: &SurfaceKind, edge_thickness: f64) -> Vec<Triangle> {
+                 side_suface: &SurfaceKind, edge_thickness: f32) -> Vec<Triangle> {
 
     let mut tris: Vec<Triangle> = Vec::new();
 
@@ -701,11 +686,11 @@ pub fn make_disk(orig: &Point, norm: &Vec3, r: f64, d: f64, num_tris: usize,
         let norm_md = norm.mult(-1.*d);
 
 
-        let theta1 = (idx as f64) / (num_tris as f64) * 2. * PI - smudge;
-        let theta2 = ((idx as f64) + 1.) / (num_tris as f64) * 2. * PI + smudge;
+        let theta1 = (idx as f32) / (num_tris as f32) * 2. * PI - smudge;
+        let theta2 = ((idx as f32) + 1.) / (num_tris as f32) * 2. * PI + smudge;
 
-        let theta3 = ((idx as f64) + 0.5) / (num_tris as f64) * 2. * PI - smudge;
-        let theta4 = ((idx as f64) + 1.5) / (num_tris as f64) * 2. * PI + smudge;
+        let theta3 = ((idx as f32) + 0.5) / (num_tris as f32) * 2. * PI - smudge;
+        let theta4 = ((idx as f32) + 1.5) / (num_tris as f32) * 2. * PI + smudge;
 
 
         // Top Face
@@ -754,22 +739,22 @@ pub struct LightSource {
     pub len2: f64
 }
 
-impl LightSource {
-    fn _get_shadow_ray(&self, p: &Point, norm: &Vec3) -> Ray {
+// impl LightSource {
+//     fn _get_shadow_ray(&self, p: &Point, norm: &Vec3) -> Ray {
         
-        let adj_orig = Vec3(self.orig.0 + rand::random::<f64>() * self.len2,
-                            self.orig.1 + rand::random::<f64>() * self.len2,
-                            self.orig.2 + rand::random::<f64>() * self.len2);
-        let dir = adj_orig.sub(p).unit();
-        let smudge = norm.mult(0.005 * (rand::random::<f64>() + 1.));
-        make_ray(&p.add(&smudge), &dir)
-    }
-}
+//         let adj_orig = Vec3(self.orig.0 + rand::random::<f64>() * self.len2,
+//                             self.orig.1 + rand::random::<f64>() * self.len2,
+//                             self.orig.2 + rand::random::<f64>() * self.len2);
+//         let dir = adj_orig.sub(p).unit();
+//         let smudge = norm.mult(0.005 * (rand::random::<f64>() + 1.));
+//         make_ray(&p.add(&smudge), &dir)
+//     }
+// }
 
 #[repr(C)]
 pub struct BoundingBox {
     pub orig: Point,
-    pub len2: f64,
+    pub len2: f32,
     pub objs: Vec<usize>,
     pub child_boxes: Vec<BoundingBox>,
     pub depth: usize
@@ -787,16 +772,16 @@ impl Clone for BoundingBox {
     }
 }
 
-fn box_contains_point(orig: &Point, len2: f64, p: &Point) -> bool {
+fn box_contains_point(orig: &Point, len2: f32, p: &Point) -> bool {
 
     let op = p.sub(orig);
 
-    op.0.abs() < len2 &&
-    op.1.abs() < len2 &&
-    op.2.abs() < len2
+    op.v[0].abs() < len2 &&
+    op.v[1].abs() < len2 &&
+    op.v[2].abs() < len2
 }
 
-fn face_contains_triangle(p: &Point, norm: &Vec3, len2: f64, t: &Triangle) -> bool {
+fn face_contains_triangle(p: &Point, norm: &Vec3, len2: f32, t: &Triangle) -> bool {
     
     // println!("{:?} {:?} {}", p, norm ,len2);
 
@@ -812,30 +797,30 @@ fn face_contains_triangle(p: &Point, norm: &Vec3, len2: f64, t: &Triangle) -> bo
                             &n1.cross(&n2));
 
     // Check line collision with box
-    let mut tmin = f64::MAX;
-    let mut tmax = f64::MAX;
-    if norm.0 == 0. {
-        let t1 = (p.0 - len2 - line_tmp.orig.0) * line_tmp.inv_dir.0;
-        let t2 = (p.0 + len2 - line_tmp.orig.0) * line_tmp.inv_dir.0;
+    let mut tmin = f32::MAX;
+    let mut tmax = f32::MAX;
+    if norm.v[0] == 0. {
+        let t1 = (p.v[0] - len2 - line_tmp.orig.v[0]) * line_tmp.inv_dir.v[0];
+        let t2 = (p.v[0] + len2 - line_tmp.orig.v[0]) * line_tmp.inv_dir.v[0];
 
         // println!("0: t1 t2: {} {}", t1, t2);
-        tmin = f64::min(tmin, f64::min(t1, t2));
+        tmin = f32::min(tmin, f32::min(t1, t2));
     };
 
-    if norm.1 == 0. {
-        let t1 = (p.1 - len2 - line_tmp.orig.1) * line_tmp.inv_dir.1;
-        let t2 = (p.1 + len2 - line_tmp.orig.1) * line_tmp.inv_dir.1;
+    if norm.v[1] == 0. {
+        let t1 = (p.v[1] - len2 - line_tmp.orig.v[1]) * line_tmp.inv_dir.v[1];
+        let t2 = (p.v[1] + len2 - line_tmp.orig.v[1]) * line_tmp.inv_dir.v[1];
 
         // println!("1: t1 t2: {} {}", t1, t2);
-        tmin = f64::min(tmin, f64::min(t1, t2));
+        tmin = f32::min(tmin, f32::min(t1, t2));
     };
 
-    if norm.2 == 0. {
-        let t1 = (p.2 - len2 - line_tmp.orig.2) * line_tmp.inv_dir.2;
-        let t2 = (p.2 + len2 - line_tmp.orig.2) * line_tmp.inv_dir.2;
+    if norm.v[2] == 0. {
+        let t1 = (p.v[2] - len2 - line_tmp.orig.v[2]) * line_tmp.inv_dir.v[2];
+        let t2 = (p.v[2] + len2 - line_tmp.orig.v[2]) * line_tmp.inv_dir.v[2];
 
         // println!("2: t1 t2: {} {}", t1, t2);
-        tmin = f64::min(tmin, f64::min(t1, t2));
+        tmin = f32::min(tmin, f32::min(t1, t2));
     };
 
     // println!("tmin: {}", tmin);
@@ -850,33 +835,33 @@ fn face_contains_triangle(p: &Point, norm: &Vec3, len2: f64, t: &Triangle) -> bo
     // println!("line: {:?}", line);
 
     // Check line collision with box
-    tmin = f64::MIN;
-    tmax = f64::MAX;
-    if norm.0 == 0. {
-        let t1 = (p.0 - len2 - line.orig.0) * line.inv_dir.0;
-        let t2 = (p.0 + len2 - line.orig.0) * line.inv_dir.0;
+    tmin = f32::MIN;
+    tmax = f32::MAX;
+    if norm.v[0] == 0. {
+        let t1 = (p.v[0] - len2 - line.orig.v[0]) * line.inv_dir.v[0];
+        let t2 = (p.v[0] + len2 - line.orig.v[0]) * line.inv_dir.v[0];
 
         // println!("0: t1 t2: {} {}", t1, t2);
-        tmin = f64::max(tmin, f64::min(t1, t2));
-        tmax = f64::min(tmax, f64::max(t1, t2));
+        tmin = f32::max(tmin, f32::min(t1, t2));
+        tmax = f32::min(tmax, f32::max(t1, t2));
     };
 
-    if norm.1 == 0. {
-        let t1 = (p.1 - len2 - line.orig.1) * line.inv_dir.1;
-        let t2 = (p.1 + len2 - line.orig.1) * line.inv_dir.1;
+    if norm.v[1] == 0. {
+        let t1 = (p.v[1] - len2 - line.orig.v[1]) * line.inv_dir.v[1];
+        let t2 = (p.v[1] + len2 - line.orig.v[1]) * line.inv_dir.v[1];
 
         // println!("1: t1 t2: {} {}", t1, t2);
-        tmin = f64::max(tmin, f64::min(t1, t2));
-        tmax = f64::min(tmax, f64::max(t1, t2));
+        tmin = f32::max(tmin, f32::min(t1, t2));
+        tmax = f32::min(tmax, f32::max(t1, t2));
     };
 
-    if norm.2 == 0. {
-        let t1 = (p.2 - len2 - line.orig.2) * line.inv_dir.2;
-        let t2 = (p.2 + len2 - line.orig.2) * line.inv_dir.2;
+    if norm.v[2] == 0. {
+        let t1 = (p.v[2] - len2 - line.orig.v[2]) * line.inv_dir.v[2];
+        let t2 = (p.v[2] + len2 - line.orig.v[2]) * line.inv_dir.v[2];
 
         // println!("2: t1 t2: {} {}", tmin, tmax);
-        tmin = f64::max(tmin, f64::min(t1, t2));
-        tmax = f64::min(tmax, f64::max(t1, t2));
+        tmin = f32::max(tmin, f32::min(t1, t2));
+        tmax = f32::min(tmax, f32::max(t1, t2));
     };
 
     // println!("tmin tmax: {} {}", tmin, tmax);
@@ -900,18 +885,18 @@ fn face_contains_triangle(p: &Point, norm: &Vec3, len2: f64, t: &Triangle) -> bo
 
 #[cfg(test)]
 mod test {
-    use crate::raytrace::{Vec3, SurfaceKind, make_color, make_triangle, face_contains_triangle};
+    use crate::raytrace::{Vec3, SurfaceKind, make_vec, make_color, make_triangle, face_contains_triangle};
 
     #[test]
     fn face_collision() {
 
-        let orig = Vec3(2., 2., 2.);
-        let norm = Vec3(0., 0., -1.);
+        let orig = make_vec(&[2., 2., 2.]);
+        let norm = make_vec(&[0., 0., -1.]);
         let len2 = 2.;
 
-        let t = make_triangle(&[Vec3(1., 0.4, 0.2),
-                                Vec3(1., 0.2, -0.3),
-                                Vec3(0.6, 0.6, -0.5)],
+        let t = make_triangle(&[make_vec(&[1., 0.4, 0.2]),
+                                make_vec(&[1., 0.2, -0.3]),
+                                make_vec(&[0.6, 0.6, -0.5])],
                                &SurfaceKind::Solid { color: make_color((0,0,0)) },
                                0.0);
         
@@ -921,7 +906,7 @@ mod test {
     }
 }
 
-pub fn box_contains_polygon(orig: &Point, len2: f64, t: &Triangle) -> bool {
+pub fn box_contains_polygon(orig: &Point, len2: f32, t: &Triangle) -> bool {
 
     if box_contains_point(orig, len2, &t.incenter) {
         return true;
@@ -934,12 +919,12 @@ pub fn box_contains_polygon(orig: &Point, len2: f64, t: &Triangle) -> bool {
     // }
 
     // Check a ray for each edge of the cube
-    let face_norms = [Vec3(1., 0., 0.),
-                      Vec3(-1., 0., 0.),
-                      Vec3(0., 1., 0.),
-                      Vec3(0., -1., 0.),
-                      Vec3(0., 0., 1.),
-                      Vec3(0., 0., -1.)];
+    let face_norms = [make_vec(&[1., 0., 0.]),
+                      make_vec(&[-1., 0., 0.]),
+                      make_vec(&[0., 1., 0.]),
+                      make_vec(&[0., -1., 0.]),
+                      make_vec(&[0., 0., 1.]),
+                      make_vec(&[0., 0., -1.])];
     for norm in face_norms {
         if face_contains_triangle(orig, &norm, len2, t) {
             return true;
@@ -997,7 +982,7 @@ pub fn box_contains_polygon(orig: &Point, len2: f64, t: &Triangle) -> bool {
 
 pub fn build_empty_box() -> BoundingBox {
     BoundingBox {
-        orig: Vec3(0., 0., 0.),
+        orig: make_vec(&[0., 0., 0.]),
         len2: 1.,
         objs: Vec::new(),
         child_boxes: Vec::new(),
@@ -1005,13 +990,13 @@ pub fn build_empty_box() -> BoundingBox {
     }
 }
 
-pub fn build_bounding_box(tris: &Vec<Triangle>, orig: &Point, len2: f64, maxdepth: usize, minobjs: usize) -> BoundingBox {
+pub fn build_bounding_box(tris: &Vec<Triangle>, orig: &Point, len2: f32, maxdepth: usize, minobjs: usize) -> BoundingBox {
     let mut refvec: Vec<usize> = Vec::with_capacity(tris.len());
     refvec.extend(0..tris.len());
     build_bounding_box_helper(tris, &refvec, orig, len2, 0, maxdepth, minobjs)
 }
 
-fn build_bounding_box_helper(tris: &Vec<Triangle>, objs: &Vec<usize>, orig: &Point, len2: f64, depth: usize, maxdepth: usize, minobjs: usize) -> BoundingBox {
+fn build_bounding_box_helper(tris: &Vec<Triangle>, objs: &Vec<usize>, orig: &Point, len2: f32, depth: usize, maxdepth: usize, minobjs: usize) -> BoundingBox {
 
     let mut subobjs: Vec<usize> = Vec::with_capacity(objs.len());
     for idx in objs {
@@ -1044,11 +1029,10 @@ fn build_bounding_box_helper(tris: &Vec<Triangle>, objs: &Vec<usize>, orig: &Poi
         let xoff = if (i & 1) == 0 { -1.*newlen2 } else { newlen2 } ;
         let yoff = if (i & 2) == 0 { -1.*newlen2 } else { newlen2 } ;
         let zoff = if (i & 4) == 0 { -1.*newlen2 } else { newlen2 } ;
+        let off_vec = make_vec(&[xoff, yoff, zoff]);
         let bbox = build_bounding_box_helper(tris,
                                              &subobjs,
-                                             &Vec3(orig.0 + xoff,
-                                                   orig.1 + yoff,
-                                                   orig.2 + zoff),
+                                             &orig.add(&off_vec),
                                              newlen2,
                                              depth + 1,
                                              maxdepth,
@@ -1065,7 +1049,7 @@ fn build_bounding_box_helper(tris: &Vec<Triangle>, objs: &Vec<usize>, orig: &Poi
     }
 }
 
-pub fn build_trivial_bounding_box(tris: &Vec<Triangle>, orig: &Point, len2: f64) -> BoundingBox {
+pub fn build_trivial_bounding_box(tris: &Vec<Triangle>, orig: &Point, len2: f32) -> BoundingBox {
 
     let mut refvec: Vec<usize> = Vec::with_capacity(tris.len());
     refvec.extend::<Vec<usize>>((0..tris.len()).collect());
@@ -1083,22 +1067,22 @@ impl BoundingBox {
     fn collides_face(&self, r: &Ray, face: usize) -> bool {
         
         let norm = match face {
-            0 => Vec3(1., 0., 0.),
-            1 => Vec3(-1., 0., 0.),
-            2 => Vec3(0., 1., 0.),
-            3 => Vec3(0., -1., 0.),
-            4 => Vec3(0., 0., 1.),
-            5 => Vec3(0., 0., -1.),
+            0 => make_vec(&[1., 0., 0.]),
+            1 => make_vec(&[-1., 0., 0.]),
+            2 => make_vec(&[0., 1., 0.]),
+            3 => make_vec(&[0., -1., 0.]),
+            4 => make_vec(&[0., 0., 1.]),
+            5 => make_vec(&[0., 0., -1.]),
             _ => panic!("Invalid face {}", face)
         };
 
         let ortho_vecs = match face {
-            0 => (Vec3(0., 1., 0.), Vec3(0., 0., 1.)),
-            1 => (Vec3(0., 1., 0.), Vec3(0., 0., 1.)),
-            2 => (Vec3(1., 0., 0.), Vec3(0., 0., 1.)),
-            3 => (Vec3(1., 0., 0.), Vec3(0., 0., 1.)),
-            4 => (Vec3(1., 0., 0.), Vec3(0., 1., 0.)),
-            5 => (Vec3(1., 0., 0.), Vec3(0., 1., 0.)),
+            0 => (make_vec(&[0., 1., 0.]), make_vec(&[0., 0., 1.])),
+            1 => (make_vec(&[0., 1., 0.]), make_vec(&[0., 0., 1.])),
+            2 => (make_vec(&[1., 0., 0.]), make_vec(&[0., 0., 1.])),
+            3 => (make_vec(&[1., 0., 0.]), make_vec(&[0., 0., 1.])),
+            4 => (make_vec(&[1., 0., 0.]), make_vec(&[0., 1., 0.])),
+            5 => (make_vec(&[1., 0., 0.]), make_vec(&[0., 1., 0.])),
             _ => panic!("Invalid face {}", face)
         };
 
@@ -1132,30 +1116,30 @@ impl BoundingBox {
 
         // hit
     
-        let mut tmin = f64::MIN;
-        let mut tmax = f64::MAX;
-        if r.dir.0 != 0. {
-            let t1 = (self.orig.0 - self.len2 - r.orig.0) * r.inv_dir.0;
-            let t2 = (self.orig.0 + self.len2 - r.orig.0) * r.inv_dir.0;
+        let mut tmin = f32::MIN;
+        let mut tmax = f32::MAX;
+        if r.dir.v[0] != 0. {
+            let t1 = (self.orig.v[0] - self.len2 - r.orig.v[0]) * r.inv_dir.v[0];
+            let t2 = (self.orig.v[0] + self.len2 - r.orig.v[0]) * r.inv_dir.v[0];
 
-            tmin = f64::max(tmin, f64::min(t1, t2));
-            tmax = f64::min(tmax, f64::max(t1, t2));
+            tmin = f32::max(tmin, f32::min(t1, t2));
+            tmax = f32::min(tmax, f32::max(t1, t2));
         }
 
-        if r.dir.1 != 0. {
-            let t1 = (self.orig.1 - self.len2 - r.orig.1) * r.inv_dir.1;
-            let t2 = (self.orig.1 + self.len2 - r.orig.1) * r.inv_dir.1;
+        if r.dir.v[1] != 0. {
+            let t1 = (self.orig.v[1] - self.len2 - r.orig.v[1]) * r.inv_dir.v[1];
+            let t2 = (self.orig.v[1] + self.len2 - r.orig.v[1]) * r.inv_dir.v[1];
 
-            tmin = f64::max(tmin, f64::min(t1, t2));
-            tmax = f64::min(tmax, f64::max(t1, t2));
+            tmin = f32::max(tmin, f32::min(t1, t2));
+            tmax = f32::min(tmax, f32::max(t1, t2));
         }
 
-        if r.dir.2 != 0. {
-            let t1 = (self.orig.2 - self.len2 - r.orig.2) * r.inv_dir.2;
-            let t2 = (self.orig.2 + self.len2 - r.orig.2) * r.inv_dir.2;
+        if r.dir.v[2] != 0. {
+            let t1 = (self.orig.v[2] - self.len2 - r.orig.v[2]) * r.inv_dir.v[2];
+            let t2 = (self.orig.v[2] + self.len2 - r.orig.v[2]) * r.inv_dir.v[2];
 
-            tmin = f64::max(tmin, f64::min(t1, t2));
-            tmax = f64::min(tmax, f64::max(t1, t2));
+            tmin = f32::max(tmin, f32::min(t1, t2));
+            tmax = f32::min(tmax, f32::max(t1, t2));
         }
 
         tmin < tmax
@@ -1232,10 +1216,12 @@ impl BoundingBox {
 
 pub trait RayCaster: Send + Sync {
     fn project_ray(&self, r: &Ray, s: &Scene, ignore_objid: usize,
-                   depth: usize, runtimes: &mut HashMap<String, ProgressStat>) -> Color;
+                   depth: usize, runtimes: &mut HashMap<String, ProgressStat>,
+                   allocator: &dyn Allocator) -> Color;
     fn color_ray(&self, r: &Ray, s: &Scene, objidx: usize,
                  point: &Point, face: &CollisionFace, depth: usize,
-                 runtimes: &mut HashMap<String, ProgressStat>) -> Color;
+                 runtimes: &mut HashMap<String, ProgressStat>,
+                 allocator: &dyn Allocator) -> Color;
 }
 
 #[derive(Debug)]
@@ -1271,7 +1257,9 @@ unsafe impl Sync for DefaultRayCaster {}
 
 impl RayCaster for DefaultRayCaster {
     fn color_ray(&self, r: &Ray, s: &Scene, objidx: usize,
-                 point: &Point, face: &CollisionFace, depth: usize, runtimes: &mut HashMap<String, ProgressStat>) -> Color {
+                 point: &Point, face: &CollisionFace, depth: usize,
+                 runtimes: &mut HashMap<String, ProgressStat>,
+                 allocator: &dyn Allocator) -> Color {
 
         let shadowed = false;
         // let shadowed = if s.lights.is_some() {
@@ -1310,7 +1298,8 @@ impl RayCaster for DefaultRayCaster {
                                     s,
                                     objidx,
                                     depth - 1,
-                                    runtimes),
+                                    runtimes,
+                                    allocator),
                         alpha)
                 
             },
@@ -1323,22 +1312,24 @@ impl RayCaster for DefaultRayCaster {
                                     s,
                                     objidx,
                                     depth - 1,
-                                    runtimes),
+                                    runtimes,
+                                    allocator),
                         alpha)
             }
         }
     }
 
     fn project_ray(&self, r: &Ray, s: &Scene, ignore_objid: usize,
-                   depth: usize, runstats: &mut HashMap<String, ProgressStat>) -> Color {
+                   depth: usize, runstats: &mut HashMap<String, ProgressStat>,
+                   allocator: &dyn Allocator) -> Color {
 
         if depth == 0 {
-            return Vec3(0., 0., 0.);
+            return make_color((0, 0, 0));
         }
 
         let t1 = get_thread_time();
 
-        let blue = Vec3(0.5, 0.7, 1.);
+        let blue = make_color((128, 180, 255));
 
         let mut path: Vec<BoundingBox> = Vec::new();
         let objs = s.boxes.get_all_objects_for_ray(&s.tris, r, &mut path);
@@ -1347,7 +1338,18 @@ impl RayCaster for DefaultRayCaster {
 
         let mut objcount = 0;
 
-        let intersections: Vec<(f64, Point, CollisionFace, usize)> = objs.iter().filter_map(
+        let intersections_checks: Vec<Option<(f32, Vec3, CollisionFace, usize)>> = intersect_triangle_list(r, objs, &s.tris, allocator);
+
+        let intersections: Vec<&(f32, Vec3, CollisionFace, usize)> = intersections_checks.iter().filter_map(
+                    |x| {
+                        match x {
+                            Some(a) => Some(a),
+                            None => None
+                        }
+                    }).collect();
+
+        /*
+        let intersections: Vec<(f32, Point, CollisionFace, usize)> = objs.iter().filter_map(
             |idx| {
                 if ignore_objid == idx as usize {
                     None
@@ -1359,6 +1361,7 @@ impl RayCaster for DefaultRayCaster {
                     }
                 }
             }).collect();
+        */
         
         let t3 = get_thread_time();
 
@@ -1377,7 +1380,7 @@ impl RayCaster for DefaultRayCaster {
                     let (acc_dist, _, _, _) = acc;
                     if dist < acc_dist { x } else { acc }
                 });
-                self.color_ray(r, s, *objidx, point, &face, depth, runstats)
+                self.color_ray(r, s, *objidx, point, &face, depth, runstats, allocator)
 
         }
     }
@@ -1408,44 +1411,44 @@ pub struct Viewport {
     samples_per_pixel: usize
 }
 
-pub fn create_transform(dir_in: &Vec3, d_roll: f64) -> (Vec3, Vec3, Vec3) {
+pub fn create_transform(dir_in: &Vec3, d_roll: f32) -> (Vec3, Vec3, Vec3) {
 
     let dir = dir_in.unit();
 
-    let roll = -1.*(-1. * dir.1).atan2(dir.2);
-    let pitch = -1.*dir.0.asin();
+    let roll = -1.*(-1. * dir.v[1]).atan2(dir.v[2]);
+    let pitch = -1.*dir.v[0].asin();
     let yaw = -1.*d_roll;
 
     (
-        Vec3(yaw.cos()*pitch.cos(),
-             yaw.sin()*pitch.cos(),
-             -1.*pitch.sin()),
+        make_vec(&[yaw.cos()*pitch.cos(),
+                   yaw.sin()*pitch.cos(),
+                   -1.*pitch.sin()]),
 
-        Vec3(yaw.cos()*pitch.sin()*roll.sin() - yaw.sin()*roll.cos(),
-             yaw.sin()*pitch.sin()*roll.sin() + yaw.cos()*roll.cos(),
-             pitch.cos()*roll.sin()),
+        make_vec(&[yaw.cos()*pitch.sin()*roll.sin() - yaw.sin()*roll.cos(),
+                   yaw.sin()*pitch.sin()*roll.sin() + yaw.cos()*roll.cos(),
+                   pitch.cos()*roll.sin()]),
 
-        Vec3(yaw.cos()*pitch.sin()*roll.cos() + yaw.sin()*roll.sin(),
-             yaw.sin()*pitch.sin()*roll.cos() - yaw.cos()*roll.sin(),
-             pitch.cos()*roll.cos())
+        make_vec(&[yaw.cos()*pitch.sin()*roll.cos() + yaw.sin()*roll.sin(),
+                   yaw.sin()*pitch.sin()*roll.cos() - yaw.cos()*roll.sin(),
+                   pitch.cos()*roll.cos()])
     )
 }
 
-pub fn create_viewport(px: (u32, u32), size: (f64, f64), pos: &Point, dir: &Vec3, fov: f64, c_roll: f64, maxdepth: usize, samples: usize) -> Viewport {
+pub fn create_viewport(px: (u32, u32), size: (f32, f32), pos: &Point, dir: &Vec3, fov: f32, c_roll: f32, maxdepth: usize, samples: usize) -> Viewport {
 
     let dist = size.0 / (2. * (fov.to_radians() / 2.).tan());
 
     let rot_basis = create_transform(dir, c_roll);
 
-    let orig = pos.add(&Vec3(1.*size.1/2., -1.*size.0/2., 0.));
+    let orig = pos.add(&make_vec(&[1.*size.1/2., -1.*size.0/2., 0.]));
     
-    let cam_r = Vec3(0., 0., dist).change_basis(rot_basis);
+    let cam_r = make_vec(&[0., 0., dist]).change_basis(rot_basis);
     let cam = pos.sub(&cam_r);
 
-    let vu = Vec3(0., size.0, 0.);
+    let vu = make_vec(&[0., size.0, 0.]);
     let vu_r = vu.change_basis(rot_basis);
 
-    let vv = Vec3(-1. * size.1, 0., 0.);
+    let vv = make_vec(&[-1. * size.1, 0., 0.]);
     let vv_r = vv.change_basis(rot_basis);
 
     Viewport {
@@ -1464,17 +1467,17 @@ impl Viewport {
 
     fn pixel_ray(&self, px: (usize, usize)) -> Ray {
 
-        let px_x = px.0 as f64;
-        let px_y = px.1 as f64;
+        let px_x = px.0 as f32;
+        let px_y = px.1 as f32;
 
-        let vu_delta = self.vu.mult(1. / self.width as f64);
-        let vv_delta = self.vv.mult(1. / self.height as f64);
+        let vu_delta = self.vu.mult(1. / self.width as f32);
+        let vv_delta = self.vv.mult(1. / self.height as f32);
 
-        // let u_off: f64 = 0.5;
-        // let v_off: f64 = 0.5;
+        // let u_off: f32 = 0.5;
+        // let v_off: f32 = 0.5;
 
-        let u_off: f64 = rand::random();
-        let v_off: f64 = rand::random();
+        let u_off = rand::random::<f32>();
+        let v_off = rand::random::<f32>();
 
         let vu_frac = vu_delta.mult(px_y + u_off);
         let vv_frac = vv_delta.mult(px_x + v_off);
@@ -1491,6 +1494,10 @@ impl Viewport {
         let mut rays_count = 0;
         let mut pixels_processed = 0;
         let mut runstats: HashMap<String, ProgressStat> = HashMap::new();
+        let bump = BumpAllocator::new((size_of::<Vec3>()*3 +
+                                       size_of::<[Vec3; 3]>() + 
+                                       size_of::<[f32; 3]>()*2 +
+                                       size_of::<f32>()*3) * s.tris.len() * self.maxdepth);
         'threadloop: loop {
             let (data, row) = match rows.lock().unwrap().pop_front() {
                                 Some(x) => {
@@ -1503,14 +1510,15 @@ impl Viewport {
             let _ = progress_tx.send((t_num, row, 0, 0, runstats.clone()));
             runstats.clear();
             for y in 0..self.width {
-                let mut acc = Vec3(0., 0., 0.);
+                let mut acc = make_vec(&[0., 0., 0.]);
                 for _i in 0..self.samples_per_pixel {
-                    let ray_color = caster.project_ray(&self.pixel_ray((row,y)), s, usize::MAX, self.maxdepth, &mut runstats);
+                    bump.reset();
+                    let ray_color = caster.project_ray(&self.pixel_ray((row,y)), s, usize::MAX, self.maxdepth, &mut runstats, &bump);
                     acc = acc.add(&ray_color);
 
                     rays_count += 1;
                 }
-                data[y as usize] = acc.mult(1./(self.samples_per_pixel as f64));
+                data[y as usize] = acc.mult(1./(self.samples_per_pixel as f32));
                 pixels_processed += 1;
                 if rays_count > 10000 {
                     let _ = progress_tx.send((t_num, row, pixels_processed, rays_count, runstats.clone()));
@@ -1526,11 +1534,12 @@ impl Viewport {
         }
     }
 
-    pub fn walk_rays(&self, s: &Scene, data: & mut[Color], threads: usize, caster: &dyn RayCaster) -> progress::ProgressCtx {
+    pub fn walk_rays(&self, s: &Scene, data: & mut[Color], threads: usize,
+                     caster: &dyn RayCaster, show_progress: bool) -> progress::ProgressCtx {
 
         let (progress_tx, progress_rx) = channel();
 
-        let mut progress_io = progress::create_ctx(threads, self.width, self.height, true);
+        let mut progress_io = progress::create_ctx(threads, self.width, self.height, show_progress);
 
 
         thread::scope(|sc| {
@@ -1577,9 +1586,9 @@ pub fn write_png(f: fs::File, img_size: (u32, u32), data: &[Color]) -> Result<()
 
     let mut data_int = Vec::with_capacity(data.len() * 3);
     for c in data {
-        data_int.push((c.0 * 255.) as u8);
-        data_int.push((c.1 * 255.) as u8);
-        data_int.push((c.2 * 255.) as u8);
+        data_int.push((c.v[0] * 255.) as u8);
+        data_int.push((c.v[1] * 255.) as u8);
+        data_int.push((c.v[2] * 255.) as u8);
     }
 
     writer.write_image_data(&data_int).unwrap();
