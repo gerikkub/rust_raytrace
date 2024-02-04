@@ -1,12 +1,14 @@
 
 use core::cmp;
 use std::ops;
+use std::simd::{Simd, u64x4};
 
 #[derive(Clone, Debug)]
 pub struct BitSet {
     bits: Vec<u64>,
+    words: Vec<u64>,
     max: usize,
-    bit_count: usize
+    bit_count: i64
 }
 
 #[derive(Debug)]
@@ -19,8 +21,10 @@ pub struct BitSetIterator<'a> {
 
 impl BitSet {
     pub fn new(maxval: usize) -> BitSet {
+        let max_aligned = maxval.next_multiple_of(64*64);
         BitSet {
-            bits: vec![0; (maxval + 63)/64],
+            bits: vec![0; max_aligned/64],
+            words: vec![0; max_aligned/(64*64)],
             max: maxval,
             bit_count: 0
         }
@@ -34,6 +38,10 @@ impl BitSet {
         if preword != self.bits[word] {
             self.bit_count += 1;
         }
+
+        let word_word = word / 64;
+        let word_bit = word % 64;
+        self.words[word_word]  |= 1 << word_bit;
     }
 
     pub fn remove(&mut self, val: u64) {
@@ -44,9 +52,17 @@ impl BitSet {
         if preword != self.bits[word] {
             self.bit_count -= 1;
         }
+
+        if self.bits[word] == 0 {
+            let word_word = word / 64;
+            let word_bit = word % 64;
+            self.words[word_word]  &= !(1 << word_bit);
+        }
+
     }
 
     pub fn iter<'a>(&'a self) -> BitSetIterator<'a> {
+        assert!(self.bit_count >= 0);
         BitSetIterator {
             bitset: &self,
             curr_word: self.bits[0],
@@ -56,7 +72,50 @@ impl BitSet {
     }
 
     pub fn len(&self) -> usize {
-        self.bit_count
+        assert!(self.bit_count >= 0);
+        self.bit_count as usize
+    }
+
+    pub fn update_bitcount(&mut self) {
+        self.bit_count = 0;
+        for w in &self.bits {
+            self.bit_count += w.count_ones() as i64;
+        }
+    }
+
+    pub fn orwith(&mut self, o: &BitSet) {
+
+        assert!(self.max >= o.max);
+
+        if o.bit_count == 0 {
+            return;
+        }
+
+        for idx in 0..o.words.len() {
+            self.words[idx] |= o.words[idx];
+        }
+
+        for idx in 0..o.bits.len() {
+            self.bits[idx] |= o.bits[idx];
+        }
+
+        self.bit_count = -1;
+
+        // for word_word in 0..o.words.len() {
+        //     if o.words[word_word] != 0 {
+
+        //         for word_bit in 0..64 {
+        //             if (o.words[word_word] | (1 << word_bit)) != 0 {
+        //                 let word = word_word * 64 + word_bit;
+        //                 self.bits[word] |= o.bits[word];
+        //             }
+        //         }
+
+        //         self.words[word_word] |= o.words[word_word]
+        //     }
+        // }
+
+        // self.bit_count = -1;
     }
 }
 
@@ -68,17 +127,28 @@ impl Iterator for BitSetIterator<'_> {
     type Item = u64;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.curr_word == 0 {
-            self.iter_word += 1;
 
-            for w in &self.bitset.bits[self.iter_word..] {
-                if *w != 0 {
-                    self.curr_word = *w;
+        if self.bitset.bit_count == 0 {
+            return None;
+        }
+
+        if self.curr_word == 0 {
+
+            loop {
+                self.iter_word += 1;
+                if self.iter_word >= self.bitset.bits.len() {
+                    return None;
+                }
+                let iter_word_word = self.iter_word / 64;
+                let iter_word_bit = self.iter_word % 64;
+
+                if self.bitset.words[iter_word_word] & (1 << iter_word_bit) != 0{
                     break;
-                } else {
-                    self.iter_word += 1;
                 }
             }
+
+            self.curr_word = self.bitset.bits[self.iter_word];
+            assert!(self.curr_word != 0);
         }
 
         if self.curr_word != 0 {
@@ -92,7 +162,8 @@ impl Iterator for BitSetIterator<'_> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let n = self.bitset.bit_count - self.steps;
+        assert!(self.bitset.bit_count >= 0);
+        let n = self.bitset.bit_count as usize - self.steps;
         (n, Some(n))
     }
 }
@@ -124,29 +195,6 @@ impl<'a> Extend<&'a usize> for BitSet {
     }
 }
 
-// TODO: Need to update with count
-// impl ops::BitOr for BitSet {
-//     type Output = Self;
-
-//     fn bitor(self, rhs: Self) -> BitSet {
-//         let mut n = BitSet::new(cmp::max(self.max, rhs.max));
-//         let (sm_set, bg_set) = if self.max < rhs.max {
-//             (&self, &rhs) 
-//         } else {
-//             (&rhs, &self) 
-//         };
-
-//         for idx in 0..sm_set.max {
-//             n.bits[idx] = sm_set.bits[idx] | bg_set.bits[idx];
-//         }
-
-//         for idx in sm_set.max..bg_set.max {
-//             n.bits[idx] = bg_set.bits[idx];
-//         }
-//         n
-//     }
-// }
-
 #[cfg(test)]
 mod tests {
     use crate::bitset::BitSet;
@@ -163,6 +211,10 @@ mod tests {
         b.insert(99);
         b.remove(2);
         b.remove(76);
+
+        println!("{:?}", b);
+
+        assert_eq!(b.len(), 5);
         let mut b_iter = b.iter();
         assert_eq!(b_iter.next().unwrap(), 50);
         assert_eq!(b_iter.next().unwrap(), 51);
@@ -174,6 +226,8 @@ mod tests {
         b.remove(75);
         b.insert(0);
 
+        println!("{:?}", b);
+        assert_eq!(b.len(), 5);
         let mut b2_iter = b.iter();
         assert_eq!(b2_iter.next().unwrap(), 0);
         assert_eq!(b2_iter.next().unwrap(), 50);

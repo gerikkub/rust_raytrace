@@ -18,6 +18,7 @@ use std::simd::*;
 use std::simd::num::SimdFloat;
 use std::mem::size_of;
 use std::alloc::Allocator;
+use log::debug;
 
 use crate::progress;
 use crate::bitset::BitSet;
@@ -126,6 +127,7 @@ impl Vec3 {
     }
 }
 
+#[inline(never)]
 fn vec3_dot_array(a_list: &[Vec3], b_list: &[Vec3]) -> Vec<f32> {
     a_list.iter().zip(b_list).map(|(a, b)| a.dot(b)).collect()
 }
@@ -373,24 +375,74 @@ pub fn make_triangle(points: &[Vec3; 3], surface: &SurfaceKind, edge_thickness: 
     }
 }
 
+fn populate_triangle_lists(tri_norms: &mut Vec<Vec3, &dyn Allocator>,
+                           tri_incenters: &mut Vec<Vec3, &dyn Allocator>,
+                           tri_sides: &mut Vec<[Vec3; 3], &dyn Allocator>,
+                           tri_sidelens: &mut Vec<[f32; 3], &dyn Allocator>,
+                           tri_edgets: &mut Vec<f32, &dyn Allocator>,
+                           objs: &BitSet,
+                           tris: &[Triangle]) {
+    tri_norms.reserve_exact(objs.len());
+    tri_incenters.reserve_exact(objs.len()); 
+    tri_sides.reserve_exact(objs.len());
+    tri_sidelens.reserve_exact(objs.len());
+    tri_edgets.reserve_exact(objs.len());
+
+    unsafe {
+        tri_norms.set_len(objs.len());
+        tri_incenters.set_len(objs.len());
+        tri_sides.set_len(objs.len());
+        tri_sidelens.set_len(objs.len());
+        tri_edgets.set_len(objs.len());
+    }
+
+    let mut count = 0;
+    for i in objs.iter() {
+        let idx = i as usize;
+        tri_norms[count] = tris[idx].norm;
+        tri_incenters[count] = tris[idx].incenter;
+        tri_sides[count] = tris[idx].sides;
+        tri_sidelens[count] = tris[idx].side_lens;
+        tri_edgets[count] = tris[idx].edge_thickness;
+
+        count += 1;
+    }
+}
+                           
+
 #[inline(never)]
 pub fn intersect_triangle_list(r: &Ray, objs: BitSet, tris: &[Triangle], allocator: &dyn Allocator) -> Vec<Option<(f32, Point, CollisionFace, usize)>> {
 
 
-    let mut tri_norms = Vec::with_capacity_in(objs.len(), allocator);
-    tri_norms.extend(objs.iter().map(|i| tris[i as usize].norm));
+    let mut tri_norms = Vec::new_in(allocator);
+    let mut tri_incenters = Vec::new_in(allocator); 
+    let mut tri_sides = Vec::new_in(allocator);
+    let mut tri_sidelens = Vec::new_in(allocator);
+    let mut tri_edgets = Vec::new_in(allocator);
 
-    let mut tri_incenters = Vec::with_capacity_in(objs.len(), allocator); 
-    tri_incenters.extend(objs.iter().map(|i| tris[i as usize].incenter));
+    populate_triangle_lists(&mut tri_norms, &mut tri_incenters,
+                            &mut tri_sides, &mut tri_sidelens,
+                            &mut tri_edgets, &objs, tris);
+    // let mut count = 0;
+    // for i in objs.iter() {
+    //     let idx = i as usize;
+    //     tri_norms[count] = tris[idx].norm;
+    //     tri_incenters[count] = tris[idx].incenter;
+    //     tri_sides[count] = tris[idx].sides;
+    //     tri_sidelens[count] = tris[idx].side_lens;
+    //     tri_edgets[count] = tris[idx].edge_thickness;
 
-    let mut tri_sides = Vec::with_capacity_in(objs.len(), allocator);
-    tri_sides.extend(objs.iter().map(|i| tris[i as usize].sides));
+    //     count += 1;
+    // }
 
-    let mut tri_sidelens = Vec::with_capacity_in(objs.len(), allocator);
-    tri_sidelens.extend(objs.iter().map(|i| tris[i as usize].side_lens));
-
-    let mut tri_edgets = Vec::with_capacity_in(objs.len(), allocator);
-    tri_edgets.extend(objs.iter().map(|i| tris[i as usize].edge_thickness));
+    // for i in objs.iter() {
+    //     let idx = i as usize;
+    //     tri_norms.push(tris[idx].norm);
+    //     tri_incenters.push(tris[idx].incenter);
+    //     tri_sides.push(tris[idx].sides);
+    //     tri_sidelens.push(tris[idx].side_lens);
+    //     tri_edgets.push(tris[idx].edge_thickness);
+    // }
 
     let tnum_list = vec3_dot_array(tri_norms.as_slice(), vec3_sub_array_single(tri_incenters.as_slice(), &r.orig).as_slice());
     let tden_list = vec3_dot_array_single(tri_norms.as_slice(), &r.dir);
@@ -404,25 +456,45 @@ pub fn intersect_triangle_list(r: &Ray, objs: BitSet, tris: &[Triangle], allocat
     let ip_list = vec3_sub_array(p_list.as_slice(), &tri_incenters.as_slice());
 
     let mut dists_list = Vec::with_capacity_in(objs.len(), allocator);
-    dists_list.extend(ip_list.iter().zip(tri_sides).map(
-        |(ip, sides)| [ ip.dot(&sides[0]),
-                        ip.dot(&sides[1]),
-                        ip.dot(&sides[2])]));
+        // dists_list.extend(ip_list.iter().zip(tri_sides).map(
+        //     |(ip, sides)| [ ip.dot(&sides[0]),
+        //                     ip.dot(&sides[1]),
+        //                     ip.dot(&sides[2])]));
+    unsafe {
+        dists_list.set_len(objs.len());
+    }
+
+    let mut count = 0;
+    for i in 0..objs.len() {
+        let ip = ip_list[i];
+        let sides = tri_sides[i].as_ref();
+        dists_list[count] = [ip.dot(&sides[0]),
+                             ip.dot(&sides[1]),
+                             ip.dot(&sides[2])];
+    }
 
 
     let mut out_vec = Vec::with_capacity(objs.len());
 
+    debug!("Objs Len: {} tri_incenters: {}", objs.len(), tri_incenters.len());
+
+    unsafe {
+        out_vec.set_len(objs.len());
+    }
+
+    let mut count = 0;
     for i in 0..objs.len() {
 
-        let dists = dists_list[i];
+        debug!("Idx : {}", i);
         let sidelens = tri_sidelens[i];
+        let dists = dists_list[i];
         let edgethickness = tri_edgets[i];
         let norm = tri_norms[i];
         let p = p_list[i];
         let t = t_list[i];
 
         let front = r.dir.dot(&norm) > 0.;
-        out_vec.push(if t < 0. {
+        out_vec[count] = if t < 0. {
             None
         } else if dists[0] > sidelens[0] ||
                     dists[1] > sidelens[1] ||
@@ -442,7 +514,9 @@ pub fn intersect_triangle_list(r: &Ray, objs: BitSet, tris: &[Triangle], allocat
             } else {
                 Some((t, p, CollisionFace::Back, i as usize))
             }
-        });
+        };
+
+        count += 1;
     }
 
     out_vec
@@ -755,7 +829,7 @@ pub struct LightSource {
 pub struct BoundingBox {
     pub orig: Point,
     pub len2: f32,
-    pub objs: Vec<usize>,
+    pub objs: BitSet,
     pub child_boxes: Vec<BoundingBox>,
     pub depth: usize
 }
@@ -984,24 +1058,24 @@ pub fn build_empty_box() -> BoundingBox {
     BoundingBox {
         orig: make_vec(&[0., 0., 0.]),
         len2: 1.,
-        objs: Vec::new(),
+        objs: BitSet::new(1),
         child_boxes: Vec::new(),
         depth: 0
     }
 }
 
 pub fn build_bounding_box(tris: &Vec<Triangle>, orig: &Point, len2: f32, maxdepth: usize, minobjs: usize) -> BoundingBox {
-    let mut refvec: Vec<usize> = Vec::with_capacity(tris.len());
+    let mut refvec = BitSet::new(tris.len());
     refvec.extend(0..tris.len());
     build_bounding_box_helper(tris, &refvec, orig, len2, 0, maxdepth, minobjs)
 }
 
-fn build_bounding_box_helper(tris: &Vec<Triangle>, objs: &Vec<usize>, orig: &Point, len2: f32, depth: usize, maxdepth: usize, minobjs: usize) -> BoundingBox {
+fn build_bounding_box_helper(tris: &Vec<Triangle>, objs: &BitSet, orig: &Point, len2: f32, depth: usize, maxdepth: usize, minobjs: usize) -> BoundingBox {
 
-    let mut subobjs: Vec<usize> = Vec::with_capacity(objs.len());
-    for idx in objs {
-        if box_contains_polygon(orig, len2, &tris[*idx]) {
-            subobjs.push(*idx);
+    let mut subobjs = BitSet::new(tris.len());
+    for idx in objs.iter() {
+        if box_contains_polygon(orig, len2, &tris[idx as usize]) {
+            subobjs.insert(idx);
         }
     }
 
@@ -1009,7 +1083,7 @@ fn build_bounding_box_helper(tris: &Vec<Triangle>, objs: &Vec<usize>, orig: &Poi
         return BoundingBox {
             orig: *orig,
             len2: len2,
-            objs: Vec::new(),
+            objs: BitSet::new(1),
             child_boxes: Vec::new(),
             depth: depth
         };
@@ -1043,7 +1117,7 @@ fn build_bounding_box_helper(tris: &Vec<Triangle>, objs: &Vec<usize>, orig: &Poi
     BoundingBox {
         orig: *orig,
         len2: len2,
-        objs: Vec::new(),
+        objs: BitSet::new(1),
         child_boxes: subboxes,
         depth: depth
     }
@@ -1051,12 +1125,12 @@ fn build_bounding_box_helper(tris: &Vec<Triangle>, objs: &Vec<usize>, orig: &Poi
 
 pub fn build_trivial_bounding_box(tris: &Vec<Triangle>, orig: &Point, len2: f32) -> BoundingBox {
 
-    let mut refvec: Vec<usize> = Vec::with_capacity(tris.len());
-    refvec.extend::<Vec<usize>>((0..tris.len()).collect());
+    let mut allobjs = BitSet::new(tris.len());
+    allobjs.extend((0..tris.len()).into_iter());
     BoundingBox {
         orig: *orig,
         len2: len2,
-        objs: refvec,
+        objs: allobjs,
         child_boxes: Vec::new(),
         depth: 0
     }
@@ -1101,20 +1175,6 @@ impl BoundingBox {
     }
 
     pub fn collides(&self, r: &Ray) -> bool {
-        // let p = r.nearest_point(&self.orig);
-        // let op = p.sub(&self.orig);
-
-        // let hit = (op.0.abs() < self.len2 &&
-        //            op.1.abs() < self.len2 &&
-        //            op.2.abs() < self.len2) ||
-        //            self.collides_face(r, 0) ||
-        //            self.collides_face(r, 1) ||
-        //            self.collides_face(r, 2) ||
-        //            self.collides_face(r, 3) ||
-        //            self.collides_face(r, 4) ||
-        //            self.collides_face(r, 5);
-
-        // hit
     
         let mut tmin = f32::MIN;
         let mut tmax = f32::MAX;
@@ -1150,19 +1210,18 @@ impl BoundingBox {
         let mut objmap = BitSet::new(tris.len());
 
         self.get_all_objects_for_ray_helper(tris, r, &mut objmap, path);
+        objmap.update_bitcount();
 
         objmap
     }
 
     fn get_all_objects_for_ray_helper(&self, tris: &Vec<Triangle>, r: &Ray, objmap: &mut BitSet, path: &mut Vec<BoundingBox>) {
-        if self.objs.len() == 0&&
+        if self.objs.len() == 0 &&
            self.child_boxes.len() == 0{
             return;
         }
         if self.collides(r) {
-            if self.objs.len() > 0 {
-                objmap.extend(self.objs.iter());
-            }
+            objmap.orwith(&self.objs);
 
             if self.child_boxes.len() > 0 {
                 for cbox in &self.child_boxes {
@@ -1338,17 +1397,16 @@ impl RayCaster for DefaultRayCaster {
 
         let mut objcount = 0;
 
-        let intersections_checks: Vec<Option<(f32, Vec3, CollisionFace, usize)>> = intersect_triangle_list(r, objs, &s.tris, allocator);
+        // let intersections_checks: Vec<Option<(f32, Vec3, CollisionFace, usize)>> = intersect_triangle_list(r, objs, &s.tris, allocator);
 
-        let intersections: Vec<&(f32, Vec3, CollisionFace, usize)> = intersections_checks.iter().filter_map(
-                    |x| {
-                        match x {
-                            Some(a) => Some(a),
-                            None => None
-                        }
-                    }).collect();
+        // let intersections: Vec<&(f32, Vec3, CollisionFace, usize)> = intersections_checks.iter().filter_map(
+        //             |x| {
+        //                 match x {
+        //                     Some(a) => Some(a),
+        //                     None => None
+        //                 }
+        //             }).collect();
 
-        /*
         let intersections: Vec<(f32, Point, CollisionFace, usize)> = objs.iter().filter_map(
             |idx| {
                 if ignore_objid == idx as usize {
@@ -1361,7 +1419,6 @@ impl RayCaster for DefaultRayCaster {
                     }
                 }
             }).collect();
-        */
         
         let t3 = get_thread_time();
 

@@ -220,13 +220,13 @@ fn main() -> Result<()> {
     // let width = 3840;
     // let height = 2160;
 
-    // let aspect = 1440. / 2560.;
-    // let width = 2560;
-    // let height = 1440;
+    let aspect = 1440. / 2560.;
+    let width = 2560;
+    let height = 1440;
 
-    let aspect = 480. / 640.;
-    let width = 640;
-    let height = 480;
+    // let aspect = 480. / 640.;
+    // let width = 640;
+    // let height = 480;
 
     // let aspect = 480. / 640.;
     // let width = 160;
@@ -260,7 +260,7 @@ fn main() -> Result<()> {
                             90.,
                             0_f32.to_radians(),
                             2,
-                            10);
+                            20);
 
     // println!("Viewport: {:?}", v);
     
@@ -321,7 +321,7 @@ fn main() -> Result<()> {
     let caster = DefaultRayCaster {};
 
     let mut data = vec![make_vec(&[0., 0., 0.]); (width*height) as usize ];
-    let progress_ctx = v.walk_rays(&s, &mut data, 1, &caster, false);
+    let progress_ctx = v.walk_rays(&s, &mut data, 16, &caster, true);
 
     progress_ctx.print_stats();
 
