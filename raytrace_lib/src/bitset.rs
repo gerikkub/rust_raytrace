@@ -1,8 +1,4 @@
 
-use core::cmp;
-use std::ops;
-use std::simd::{Simd, u64x4};
-
 #[derive(Clone, Debug)]
 pub struct BitSet {
     bits: Vec<u64>,
@@ -20,6 +16,7 @@ pub struct BitSetIterator<'a> {
 }
 
 impl BitSet {
+    #[allow(dead_code)]
     pub fn new(maxval: usize) -> BitSet {
         let max_aligned = maxval.next_multiple_of(64*64);
         BitSet {
@@ -30,6 +27,7 @@ impl BitSet {
         }
     }
 
+    #[allow(dead_code)]
     pub fn insert(&mut self, val: u64) {
         let word = (val / 64) as usize;
         let bit = val % 64;
@@ -44,6 +42,7 @@ impl BitSet {
         self.words[word_word]  |= 1 << word_bit;
     }
 
+    #[allow(dead_code)]
     pub fn remove(&mut self, val: u64) {
         let word = (val / 64) as usize;
         let bit = val % 64;
@@ -61,6 +60,7 @@ impl BitSet {
 
     }
 
+    #[allow(dead_code)]
     pub fn iter<'a>(&'a self) -> BitSetIterator<'a> {
         assert!(self.bit_count >= 0);
         BitSetIterator {
@@ -71,11 +71,13 @@ impl BitSet {
         }
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         assert!(self.bit_count >= 0);
         self.bit_count as usize
     }
 
+    #[allow(dead_code)]
     pub fn update_bitcount(&mut self) {
         self.bit_count = 0;
         for w in &self.bits {
@@ -83,6 +85,7 @@ impl BitSet {
         }
     }
 
+    #[allow(dead_code)]
     pub fn orwith(&mut self, o: &BitSet) {
 
         assert!(self.max >= o.max);
@@ -100,22 +103,6 @@ impl BitSet {
         }
 
         self.bit_count = -1;
-
-        // for word_word in 0..o.words.len() {
-        //     if o.words[word_word] != 0 {
-
-        //         for word_bit in 0..64 {
-        //             if (o.words[word_word] | (1 << word_bit)) != 0 {
-        //                 let word = word_word * 64 + word_bit;
-        //                 self.bits[word] |= o.bits[word];
-        //             }
-        //         }
-
-        //         self.words[word_word] |= o.words[word_word]
-        //     }
-        // }
-
-        // self.bit_count = -1;
     }
 }
 

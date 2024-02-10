@@ -1,33 +1,23 @@
 
-use core::num;
 use core::panic;
-use core::slice::SlicePattern;
-use std::alloc::alloc;
-use std::mem;
 use std::time;
 use std::fs;
 use std::io;
 use std::io::Result;
 use std::thread;
-use std::cmp::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::mpsc::{channel, Sender};
 use std::collections::{HashMap, VecDeque, BTreeMap};
 use syscalls::{Sysno, syscall};
-use std::f32::consts::{PI, FRAC_PI_4, FRAC_PI_2};
+use std::f32::consts::{PI, FRAC_PI_2};
 use std::simd::*;
 use std::simd::num::SimdFloat;
-use std::mem::size_of;
-use std::alloc::Allocator;
 use log::debug;
 use ordered_float::OrderedFloat;
 
 use crate::progress;
-use crate::bitset::BitSet;
 use crate::progress::ProgressStat;
-use crate::bumpalloc::BumpAllocator;
-
 
 #[derive(Clone, Copy, Debug)]
 pub struct Vec3 {
@@ -137,43 +127,53 @@ impl Vec3 {
     }
 }
 
+#[allow(dead_code)]
 #[inline(never)]
 fn vec3_dot_array(a_list: &[Vec3], b_list: &[Vec3]) -> Vec<f32> {
     a_list.iter().zip(b_list).map(|(a, b)| a.dot(b)).collect()
 }
 
+#[allow(dead_code)]
 fn vec3_dot_array_single(a_list: &[Vec3], b: &Vec3) -> Vec<f32> {
     a_list.iter().map(|a| a.dot(b)).collect()
 }
 
+#[allow(dead_code)]
 fn vec3_add_array(a_list: &[Vec3], b_list: &[Vec3]) -> Vec<Vec3> {
     a_list.iter().zip(b_list).map(|(a, b)| a.add(b)).collect()
 }
 
+#[allow(dead_code)]
 fn vec3_add_array_single(a_list: &[Vec3], b: &Vec3) -> Vec<Vec3> {
     a_list.iter().map(|a| a.add(b)).collect()
 }
 
+#[allow(dead_code)]
 fn vec3_sub_array(a_list: &[Vec3], b_list: &[Vec3]) -> Vec<Vec3> {
     a_list.iter().zip(b_list).map(|(a, b)| a.sub(b)).collect()
 }
 
+#[allow(dead_code)]
 fn vec3_sub_array_single(a_list: &[Vec3], b: &Vec3) -> Vec<Vec3> {
     a_list.iter().map(|a| a.sub(b)).collect()
 }
 
+#[allow(dead_code)]
 fn vec3_mult_array(a_list: &[Vec3], b_list: &[f32]) -> Vec<Vec3> {
     a_list.iter().zip(b_list).map(|(a, b)| a.mult(*b)).collect()
 }
 
+#[allow(dead_code)]
 fn vec3_mult_array_single(a_list: &[Vec3], b: f32) -> Vec<Vec3> {
     a_list.iter().map(|a| a.mult(b)).collect()
 }
 
+#[allow(dead_code)]
 fn vec3_len2_array(a_list: &[Vec3]) -> Vec<f32> {
     a_list.iter().map(|a| a.len2()).collect()
 }
 
+#[allow(dead_code)]
 fn vec3_len_array(a_list: &[Vec3]) -> Vec<f32> {
     a_list.iter().map(|a| a.len()).collect()
 }
@@ -273,7 +273,7 @@ impl Ray {
         }
     }
 
-    fn nearest_point(&self, o: &Point) -> Point {
+    fn _nearest_point(&self, o: &Point) -> Point {
 
         let ao = o.sub(&self.orig);
         let ap = self.dir.mult(ao.dot(&self.dir)/self.dir.len2());
@@ -385,153 +385,6 @@ pub fn make_triangle(points: &[Vec3; 3], surface: &SurfaceKind, edge_thickness: 
         surface: *surface,
         edge_thickness: edge_thickness
     }
-}
-
-fn populate_triangle_lists(tri_norms: &mut Vec<Vec3, &dyn Allocator>,
-                           tri_incenters: &mut Vec<Vec3, &dyn Allocator>,
-                           tri_sides: &mut Vec<[Vec3; 3], &dyn Allocator>,
-                           tri_sidelens: &mut Vec<[f32; 3], &dyn Allocator>,
-                           tri_edgets: &mut Vec<f32, &dyn Allocator>,
-                           objs: &BitSet,
-                           tris: &[Triangle]) {
-    tri_norms.reserve_exact(objs.len());
-    tri_incenters.reserve_exact(objs.len()); 
-    tri_sides.reserve_exact(objs.len());
-    tri_sidelens.reserve_exact(objs.len());
-    tri_edgets.reserve_exact(objs.len());
-
-    unsafe {
-        tri_norms.set_len(objs.len());
-        tri_incenters.set_len(objs.len());
-        tri_sides.set_len(objs.len());
-        tri_sidelens.set_len(objs.len());
-        tri_edgets.set_len(objs.len());
-    }
-
-    let mut count = 0;
-    for i in objs.iter() {
-        let idx = i as usize;
-        tri_norms[count] = tris[idx].norm;
-        tri_incenters[count] = tris[idx].incenter;
-        tri_sides[count] = tris[idx].sides;
-        tri_sidelens[count] = tris[idx].side_lens;
-        tri_edgets[count] = tris[idx].edge_thickness;
-
-        count += 1;
-    }
-}
-                           
-
-#[inline(never)]
-pub fn intersect_triangle_list(r: &Ray, objs: BitSet, tris: &[Triangle], allocator: &dyn Allocator) -> Vec<Option<(f32, Point, CollisionFace, usize)>> {
-
-
-    let mut tri_norms = Vec::new_in(allocator);
-    let mut tri_incenters = Vec::new_in(allocator); 
-    let mut tri_sides = Vec::new_in(allocator);
-    let mut tri_sidelens = Vec::new_in(allocator);
-    let mut tri_edgets = Vec::new_in(allocator);
-
-    populate_triangle_lists(&mut tri_norms, &mut tri_incenters,
-                            &mut tri_sides, &mut tri_sidelens,
-                            &mut tri_edgets, &objs, tris);
-    // let mut count = 0;
-    // for i in objs.iter() {
-    //     let idx = i as usize;
-    //     tri_norms[count] = tris[idx].norm;
-    //     tri_incenters[count] = tris[idx].incenter;
-    //     tri_sides[count] = tris[idx].sides;
-    //     tri_sidelens[count] = tris[idx].side_lens;
-    //     tri_edgets[count] = tris[idx].edge_thickness;
-
-    //     count += 1;
-    // }
-
-    // for i in objs.iter() {
-    //     let idx = i as usize;
-    //     tri_norms.push(tris[idx].norm);
-    //     tri_incenters.push(tris[idx].incenter);
-    //     tri_sides.push(tris[idx].sides);
-    //     tri_sidelens.push(tris[idx].side_lens);
-    //     tri_edgets.push(tris[idx].edge_thickness);
-    // }
-
-    let tnum_list = vec3_dot_array(tri_norms.as_slice(), vec3_sub_array_single(tri_incenters.as_slice(), &r.orig).as_slice());
-    let tden_list = vec3_dot_array_single(tri_norms.as_slice(), &r.dir);
-
-    let mut t_list = Vec::with_capacity_in(objs.len(), allocator);
-    t_list.extend(tnum_list.iter().zip(tden_list).map(|(tnum, tden)|  tnum / tden));
-
-    let mut p_list = Vec::with_capacity_in(objs.len(), allocator);
-    p_list.extend(t_list.iter().map(|t| r.at(*t)));
-
-    let ip_list = vec3_sub_array(p_list.as_slice(), &tri_incenters.as_slice());
-
-    let mut dists_list = Vec::with_capacity_in(objs.len(), allocator);
-        // dists_list.extend(ip_list.iter().zip(tri_sides).map(
-        //     |(ip, sides)| [ ip.dot(&sides[0]),
-        //                     ip.dot(&sides[1]),
-        //                     ip.dot(&sides[2])]));
-    unsafe {
-        dists_list.set_len(objs.len());
-    }
-
-    let mut count = 0;
-    for i in 0..objs.len() {
-        let ip = ip_list[i];
-        let sides = tri_sides[i].as_ref();
-        dists_list[count] = [ip.dot(&sides[0]),
-                             ip.dot(&sides[1]),
-                             ip.dot(&sides[2])];
-    }
-
-
-    let mut out_vec = Vec::with_capacity(objs.len());
-
-    debug!("Objs Len: {} tri_incenters: {}", objs.len(), tri_incenters.len());
-
-    unsafe {
-        out_vec.set_len(objs.len());
-    }
-
-    let mut count = 0;
-    for i in 0..objs.len() {
-
-        debug!("Idx : {}", i);
-        let sidelens = tri_sidelens[i];
-        let dists = dists_list[i];
-        let edgethickness = tri_edgets[i];
-        let norm = tri_norms[i];
-        let p = p_list[i];
-        let t = t_list[i];
-
-        let front = r.dir.dot(&norm) > 0.;
-        out_vec[count] = if t < 0. {
-            None
-        } else if dists[0] > sidelens[0] ||
-                    dists[1] > sidelens[1] ||
-                    dists[2] > sidelens[2] {
-            None
-        } else if dists[0] > (sidelens[0] * (1. - edgethickness)) ||
-                    dists[1] > (sidelens[1] * (1. - edgethickness)) ||
-                    dists[2] > (sidelens[2] * (1. - edgethickness)) {
-            if front {
-                Some((t, p, CollisionFace::EdgeFront, i as usize))
-            } else {
-                Some((t, p, CollisionFace::EdgeBack, i as usize))
-            }
-        } else {
-            if front {
-                Some((t, p, CollisionFace::Front, i as usize))
-            } else {
-                Some((t, p, CollisionFace::Back, i as usize))
-            }
-        };
-
-        count += 1;
-    }
-
-    out_vec
 }
 
 impl Collidable for Triangle {
@@ -751,15 +604,14 @@ pub struct LightSource {
 #[derive(Clone)]
 enum BBSubobj {
     Boxes(Vec<BoundingBox>),
-    Tris(Vec<usize>),
-    Empty
+    Tris(Vec<usize>)
 }
 
 pub struct BoundingBox {
-    pub orig: Point,
-    pub len2: f32,
-    pub objs: BBSubobj,
-    pub depth: usize
+    orig: Point,
+    len2: f32,
+    objs: BBSubobj,
+    depth: usize
 }
 
 impl Clone for BoundingBox {
@@ -797,7 +649,6 @@ fn face_contains_triangle(p: &Point, norm: &Vec3, len2: f32, t: &Triangle) -> bo
 
     // Check line collision with box
     let mut tmin = f32::MAX;
-    let mut tmax = f32::MAX;
     if norm.v[0] == 0. {
         let t1 = (p.v[0] - len2 - line_tmp.orig.v[0]) * line_tmp.inv_dir.v[0];
         let t2 = (p.v[0] + len2 - line_tmp.orig.v[0]) * line_tmp.inv_dir.v[0];
@@ -827,7 +678,7 @@ fn face_contains_triangle(p: &Point, norm: &Vec3, len2: f32, t: &Triangle) -> bo
 
     // Check line collision with box
     tmin = f32::MIN;
-    tmax = f32::MAX;
+    let mut tmax = f32::MAX;
     if norm.v[0] == 0. {
         let t1 = (p.v[0] - len2 - line.orig.v[0]) * line.inv_dir.v[0];
         let t2 = (p.v[0] + len2 - line.orig.v[0]) * line.inv_dir.v[0];
@@ -871,7 +722,7 @@ fn face_contains_triangle(p: &Point, norm: &Vec3, len2: f32, t: &Triangle) -> bo
 
 #[cfg(test)]
 mod test {
-    use crate::raytrace::{Vec3, SurfaceKind, make_vec, make_color, make_triangle, face_contains_triangle};
+    use crate::raytrace::{SurfaceKind, make_vec, make_color, make_triangle, face_contains_triangle};
 
     #[test]
     fn face_collision() {
@@ -929,7 +780,7 @@ pub fn build_empty_box() -> BoundingBox {
 }
 
 pub fn build_bounding_box(tris: &Vec<Triangle>, orig: &Point, len2: f32, maxdepth: usize, minobjs: usize) -> BoundingBox {
-    let mut refvec = (0..tris.len()).collect();
+    let refvec = (0..tris.len()).collect();
     build_bounding_box_helper(tris, &refvec, orig, len2, 0, maxdepth, minobjs).unwrap()
 }
 
@@ -987,7 +838,7 @@ fn build_bounding_box_helper(tris: &Vec<Triangle>, objs: &Vec<usize>, orig: &Poi
 
 pub fn build_trivial_bounding_box(tris: &Vec<Triangle>, orig: &Point, len2: f32) -> BoundingBox {
 
-    let mut allobjs = (0..tris.len()).collect();
+    let allobjs = (0..tris.len()).collect();
     BoundingBox {
         orig: *orig,
         len2: len2,
@@ -998,42 +849,6 @@ pub fn build_trivial_bounding_box(tris: &Vec<Triangle>, orig: &Point, len2: f32)
 
 impl BoundingBox {
     
-    fn collides_face(&self, r: &Ray, face: usize) -> bool {
-        
-        let norm = match face {
-            0 => make_vec(&[1., 0., 0.]),
-            1 => make_vec(&[-1., 0., 0.]),
-            2 => make_vec(&[0., 1., 0.]),
-            3 => make_vec(&[0., -1., 0.]),
-            4 => make_vec(&[0., 0., 1.]),
-            5 => make_vec(&[0., 0., -1.]),
-            _ => panic!("Invalid face {}", face)
-        };
-
-        let ortho_vecs = match face {
-            0 => (make_vec(&[0., 1., 0.]), make_vec(&[0., 0., 1.])),
-            1 => (make_vec(&[0., 1., 0.]), make_vec(&[0., 0., 1.])),
-            2 => (make_vec(&[1., 0., 0.]), make_vec(&[0., 0., 1.])),
-            3 => (make_vec(&[1., 0., 0.]), make_vec(&[0., 0., 1.])),
-            4 => (make_vec(&[1., 0., 0.]), make_vec(&[0., 1., 0.])),
-            5 => (make_vec(&[1., 0., 0.]), make_vec(&[0., 1., 0.])),
-            _ => panic!("Invalid face {}", face)
-        };
-
-        // t = -1 * (norm * (orig - Rorig)) / (norm * Rdir)
-        let surf = self.orig.add(&norm.mult(self.len2));
-        let t = norm.dot(&surf.sub(&r.orig)) / norm.dot(&r.dir);
-        if t < 0. {
-            return false;
-        }
-
-        let p = r.at(t);
-        let op = p.sub(&self.orig);
-        
-        op.dot(&ortho_vecs.0).abs() < self.len2 &&
-        op.dot(&ortho_vecs.1).abs() < self.len2
-    }
-
     #[inline(never)]
     pub fn collides(&self, r: &Ray) -> Option<(f32, f32)> {
     
@@ -1098,10 +913,6 @@ impl BoundingBox {
         // println!("BBx: {}", self.depth);
         debug!("{}Bounding box: {}", " ".repeat(self.depth), self.debug_str());
         match &self.objs {
-            BBSubobj::Empty => {
-                debug!("{} Empty", " ".repeat(self.depth));
-                None
-            }
             BBSubobj::Tris(_subts) => {
                 debug!("{} Subobjects", " ".repeat(self.depth));
                 match self.get_box_min_time_intersection(tris, r) {
@@ -1253,12 +1064,8 @@ impl BoundingBox {
     }
 
     fn get_all_objects_for_ray_helper(&self, tris: &Vec<Triangle>, r: &Ray, objmap: &mut BTreeMap<OrderedFloat<f32>, Vec<usize>>) {
-        match &self.objs {
-            BBSubobj::Empty => return,
-            _ =>  {}
-        }
         match self.collides(r) {
-            Some((tmin, tmax)) => {
+            Some((tmin, _tmax)) => {
                 match &self.objs {
                     BBSubobj::Tris(tris) => {
                         objmap.insert(OrderedFloat(tmin), tris.clone());
@@ -1267,8 +1074,7 @@ impl BoundingBox {
                         for cbox in c {
                             cbox.get_all_objects_for_ray_helper(tris, r, objmap);
                         }
-                    },
-                    _ => panic!("Should not be empty")
+                    }
                 }
             },
             _ => {}
@@ -1287,8 +1093,7 @@ impl BoundingBox {
                 for t in ts {
                     println!("Obj {}", t);
                 }
-            },
-            _ => {}
+            }
         }
     }
 
@@ -1324,13 +1129,11 @@ impl BoundingBox {
 }
 
 pub trait RayCaster: Send + Sync {
-    fn project_ray(&self, r: &Ray, s: &Scene, ignore_objid: usize,
-                   depth: usize, runtimes: &mut HashMap<String, ProgressStat>,
-                   allocator: &dyn Allocator) -> Color;
+    fn project_ray(&self, r: &Ray, s: &Scene, depth: usize,
+                   runtimes: &mut HashMap<String, ProgressStat>) -> Color;
     fn color_ray(&self, r: &Ray, s: &Scene, objidx: usize,
                  point: &Point, face: &CollisionFace, depth: usize,
-                 runtimes: &mut HashMap<String, ProgressStat>,
-                 allocator: &dyn Allocator) -> Color;
+                 runtimes: &mut HashMap<String, ProgressStat>) -> Color;
 }
 
 #[derive(Debug)]
@@ -1367,8 +1170,7 @@ unsafe impl Sync for DefaultRayCaster {}
 impl RayCaster for DefaultRayCaster {
     fn color_ray(&self, r: &Ray, s: &Scene, objidx: usize,
                  point: &Point, face: &CollisionFace, depth: usize,
-                 runtimes: &mut HashMap<String, ProgressStat>,
-                 allocator: &dyn Allocator) -> Color {
+                 runtimes: &mut HashMap<String, ProgressStat>) -> Color {
 
         let shadowed = false;
         // let shadowed = if s.lights.is_some() {
@@ -1404,10 +1206,8 @@ impl RayCaster for DefaultRayCaster {
                         &self.project_ray(&lambertian_ray(point,
                                                     &s.tris[objidx].normal(point, face)),
                                     s,
-                                    objidx,
                                     depth - 1,
-                                    runtimes,
-                                    allocator),
+                                    runtimes),
                         alpha)
                 
             },
@@ -1418,18 +1218,15 @@ impl RayCaster for DefaultRayCaster {
                                                     &r.dir,
                                                     scattering),
                                     s,
-                                    objidx,
                                     depth - 1,
-                                    runtimes,
-                                    allocator),
+                                    runtimes),
                         alpha)
             }
         }
     }
 
-    fn project_ray(&self, r: &Ray, s: &Scene, ignore_objid: usize,
-                   depth: usize, runstats: &mut HashMap<String, ProgressStat>,
-                   allocator: &dyn Allocator) -> Color {
+    fn project_ray(&self, r: &Ray, s: &Scene, depth: usize, 
+                   runstats: &mut HashMap<String, ProgressStat>) -> Color {
 
         debug!("Ray: {:?}", r);
 
@@ -1454,70 +1251,10 @@ impl RayCaster for DefaultRayCaster {
         match hit {
             None => blue,
             Some((_t, point, face, objidx)) => {
-                self.color_ray(r, s, objidx, &point, &face, depth, runstats, allocator)
+                self.color_ray(r, s, objidx, &point, &face, depth, runstats)
             }
         }
 
-        // let t1 = get_thread_time();
-
-        // let objs = s.boxes.get_all_objects_for_ray(&s.tris, r);
-
-        // let t2 = get_thread_time();
-
-        // // let intersections_checks: Vec<Option<(f32, Vec3, CollisionFace, usize)>> = intersect_triangle_list(r, objs, &s.tris, allocator);
-
-        // // let intersections: Vec<&(f32, Vec3, CollisionFace, usize)> = intersections_checks.iter().filter_map(
-        // //             |x| {
-        // //                 match x {
-        // //                     Some(a) => Some(a),
-        // //                     None => None
-        // //                 }
-        // //             }).collect();
-
-        // let intersections: Vec<(f32, Point, CollisionFace, usize)> = objs.iter().fold(Vec::new(),
-        //     |acc, (t, idx_list)| {
-        //         if acc.len() > 0 {
-        //             acc
-        //         } else {
-
-        //             let mut tris = Vec::new();
-        //             for idx in idx_list {
-        //                 if ignore_objid == *idx {
-        //                     continue
-        //                 } else {
-        //                     match s.tris[*idx].intersects(&r) {
-        //                         Some(p) => {
-        //                             tris.push((p.0, p.1, p.2, *idx));
-        //                         },
-        //                         _ => {}
-        //                     }
-        //                 }
-        //             }
-
-        //             tris
-        //         }
-        //     });
-        
-        // let t3 = get_thread_time();
-
-        // *runstats.entry("BoundingBox".to_string()).or_insert(ProgressStat::Time(time::Duration::from_nanos(0))).as_time_mut() += time::Duration::from_nanos((t2-t1) as u64);
-        // *runstats.entry("Intersections".to_string()).or_insert(ProgressStat::Time(time::Duration::from_nanos(0))).as_time_mut() += time::Duration::from_nanos((t3-t2) as u64);
-
-        // *runstats.entry("Rays".to_string()).or_insert(ProgressStat::Count(0)).as_count_mut() += 1;
-        // *runstats.entry("TriangleChecks".to_string()).or_insert(ProgressStat::Count(0)).as_count_mut() += objcount;
-
-        // if intersections.len() == 0 {
-        //     blue
-        // } else {
-        //     let (_dist, point, face, objidx) = intersections.iter().fold(&intersections[0],
-        //         |acc, x| {
-        //             let (dist, _, _, _) = x;
-        //             let (acc_dist, _, _, _) = acc;
-        //             if dist < acc_dist { x } else { acc }
-        //         });
-        //         self.color_ray(r, s, *objidx, point, &face, depth, runstats, allocator)
-
-        // }
     }
 
 }
@@ -1608,7 +1345,7 @@ impl Viewport {
         let vu_delta = self.vu.mult(1. / self.width as f32);
         let vv_delta = self.vv.mult(1. / self.height as f32);
 
-        let (u_off, v_off) = if self.samples_per_pixel > 1 {
+        let (u_off, v_off) = if self.samples_per_pixel == 1 {
             (0.5, 0.5)
         } else {
             (rand::random::<f32>(), rand::random::<f32>())
@@ -1623,16 +1360,12 @@ impl Viewport {
     }
 
     fn walk_ray_set(&self, s: &Scene, rows: Arc<Mutex<VecDeque<(&mut [Color], usize)>>>,
-                    t_num: usize, progress_tx: Sender<(usize, usize, usize, usize, HashMap<String, ProgressStat>)>,
+                    t_num: usize, progress_tx: Sender<(usize, usize, usize, HashMap<String, ProgressStat>)>,
                     caster: &dyn RayCaster) {
 
         let mut rays_count = 0;
         let mut pixels_processed = 0;
         let mut runstats: HashMap<String, ProgressStat> = HashMap::new();
-        let bump = BumpAllocator::new((size_of::<Vec3>()*3 +
-                                       size_of::<[Vec3; 3]>() + 
-                                       size_of::<[f32; 3]>()*2 +
-                                       size_of::<f32>()*3) * s.tris.len() * self.maxdepth);
         'threadloop: loop {
             let (data, row) = match rows.lock().unwrap().pop_front() {
                                 Some(x) => {
@@ -1642,13 +1375,12 @@ impl Viewport {
                                 };
             
             
-            let _ = progress_tx.send((t_num, row, 0, 0, runstats.clone()));
+            let _ = progress_tx.send((t_num, row, 0, runstats.clone()));
             runstats.clear();
             for y in 0..self.width {
                 let mut acc = make_vec(&[0., 0., 0.]);
                 for _i in 0..self.samples_per_pixel {
-                    bump.reset();
-                    let ray_color = caster.project_ray(&self.pixel_ray((row,y)), s, usize::MAX, self.maxdepth, &mut runstats, &bump);
+                    let ray_color = caster.project_ray(&self.pixel_ray((row,y)), s, self.maxdepth, &mut runstats);
                     acc = acc.add(&ray_color);
 
                     rays_count += 1;
@@ -1656,13 +1388,13 @@ impl Viewport {
                 data[y as usize] = acc.mult(1./(self.samples_per_pixel as f32));
                 pixels_processed += 1;
                 if rays_count > 10000 {
-                    let _ = progress_tx.send((t_num, row, pixels_processed, rays_count, runstats.clone()));
+                    let _ = progress_tx.send((t_num, row, pixels_processed, runstats.clone()));
                     rays_count = 0;
                     pixels_processed = 0;
                     runstats.clear();
                 }
             }
-            let _ = progress_tx.send((t_num, row, pixels_processed, rays_count, runstats.clone()));
+            let _ = progress_tx.send((t_num, row, pixels_processed, runstats.clone()));
             rays_count = 0;
             pixels_processed = 0;
             runstats.clear();
@@ -1674,13 +1406,9 @@ impl Viewport {
 
         let mut progress_io = progress::create_ctx(1, self.width, self.height, false);
 
-        let bump = BumpAllocator::new((size_of::<Vec3>()*3 +
-                                       size_of::<[Vec3; 3]>() + 
-                                       size_of::<[f32; 3]>()*2 +
-                                       size_of::<f32>()*3) * s.tris.len() * self.maxdepth);
         let mut runstats: HashMap<String, ProgressStat> = HashMap::new();
 
-        let ray_color = caster.project_ray(&self.pixel_ray((px.1,px.0)), s, usize::MAX, self.maxdepth, &mut runstats, &bump);
+        let ray_color = caster.project_ray(&self.pixel_ray((px.1,px.0)), s, self.maxdepth, &mut runstats);
 
         data[0] = ray_color;
 
@@ -1714,8 +1442,8 @@ impl Viewport {
             drop(progress_tx);
             'waitloop: loop {
                 match progress_rx.recv() {
-                    Ok((t_num, row, y, rays_so_far, runstats)) => {
-                        progress_io.update(t_num, row, y, rays_so_far, &runstats);
+                    Ok((t_num, row, y, runstats)) => {
+                        progress_io.update(t_num, row, y, &runstats);
                     }
                     Err(_x) => {
                         break 'waitloop;

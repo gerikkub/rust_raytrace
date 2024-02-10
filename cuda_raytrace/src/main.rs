@@ -220,13 +220,13 @@ fn main() -> Result<()> {
     // let width = 3840;
     // let height = 2160;
 
-    let aspect = 1440. / 2560.;
-    let width = 2560;
-    let height = 1440;
+    // let aspect = 1440. / 2560.;
+    // let width = 2560;
+    // let height = 1440;
 
-    // let aspect = 480. / 640.;
-    // let width = 640;
-    // let height = 480;
+    let aspect = 480. / 640.;
+    let width = 640;
+    let height = 480;
 
     // let aspect = 480. / 640.;
     // let width = 160;
@@ -242,7 +242,9 @@ fn main() -> Result<()> {
                                          1.0,
                                          raytrace::create_transform(&make_vec(&[0., 0.3, 1.]).unit(),
                                                                     270_f32.to_radians()),
-                                         &SurfaceKind::Solid { color: make_color((252, 119, 0))},
+                                        //  &SurfaceKind::Solid { color: make_color((252, 119, 0))},
+                                         &SurfaceKind::Matte { color: make_color((252, 119, 0)),
+                                                               alpha: 0.2 },
                                          0.05));
 
     // obj_data.extend(obj_parser::parse_obj("teapot_tri.obj", 10,
@@ -264,7 +266,7 @@ fn main() -> Result<()> {
                             90.,
                             0_f32.to_radians(),
                             5,
-                            30);
+                            10);
 
     obj_data.extend(make_disk(&make_vec(&[4., 4., 7.]),
                               &make_vec(&[-0.3, -0.55, -0.5]).unit(),
@@ -293,7 +295,7 @@ fn main() -> Result<()> {
                                            alpha: 0.2 },
                               -1.));
 
-    // optimize(&obj_data, &v, (9, 30));
+    // optimize(&obj_data, &v, (10, 15));
     // return Ok(());
 
     // let bbox = raytrace::build_empty_box();
@@ -303,8 +305,8 @@ fn main() -> Result<()> {
     let bbox = raytrace::build_bounding_box(&obj_data,
                                             &make_vec(&[0., 0., 20.1]),
                                             20.,
-                                            10,
-                                            15);
+                                            7,
+                                            19);
 
 
     // let light_orig = Vec3(7., 15., 4.);
@@ -329,7 +331,7 @@ fn main() -> Result<()> {
     // let _ = raytrace::write_png(file, (1, 1), &data);
 
     let mut data = vec![make_vec(&[0., 0., 0.]); (width*height) as usize ];
-    let progress_ctx = v.walk_rays(&s, &mut data, 12, &caster, true);
+    let progress_ctx = v.walk_rays(&s, &mut data, 1, &caster, true);
     progress_ctx.print_stats();
     let _ = raytrace::write_png(file, (width, height), &data);
 

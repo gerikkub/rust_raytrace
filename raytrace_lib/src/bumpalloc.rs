@@ -2,9 +2,8 @@
 //use std::collections::HashSet;
 use std::cell::{UnsafeCell, RefCell};
 use std::alloc::{Allocator, Layout, AllocError};
-use std::ptr::{NonNull};
+use std::ptr::NonNull;
 use std::alloc;
-use std::slice;
 use log::debug;
 
 struct BumpAllocatorInner {
@@ -19,10 +18,11 @@ pub struct BumpAllocator {
 }
 
 impl BumpAllocator {
+    #[allow(dead_code)]
     pub fn new(size: usize) -> BumpAllocator {
         BumpAllocator {
             internal: RefCell::new( BumpAllocatorInner {
-                mem: unsafe { UnsafeCell::new(alloc::Global.allocate_zeroed(Layout::from_size_align(size, 8).unwrap()).unwrap()) },
+                mem: UnsafeCell::new(alloc::Global.allocate_zeroed(Layout::from_size_align(size, 8).unwrap()).unwrap()),
                 mem_size: size,
                 last_idx:  0,
                 alloc_count: 0
@@ -47,13 +47,12 @@ unsafe impl Allocator for BumpAllocator {
 
         internal.last_idx = new_end;
         internal.alloc_count += 1;
-        unsafe {
-            let new_ptr = internal.mem.get_mut().as_mut_ptr().wrapping_add(new_start);
-            Ok(NonNull::slice_from_raw_parts(NonNull::new(new_ptr).unwrap(), layout.size()))
-        }
+
+        let new_ptr = internal.mem.get_mut().as_mut_ptr().wrapping_add(new_start);
+        Ok(NonNull::slice_from_raw_parts(NonNull::new(new_ptr).unwrap(), layout.size()))
     }
 
-    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+    unsafe fn deallocate(&self, _ptr: NonNull<u8>, _layout: Layout) {
 
         let mut internal = self.internal.borrow_mut();
 
@@ -64,6 +63,7 @@ unsafe impl Allocator for BumpAllocator {
 
 impl BumpAllocator {
  
+    #[allow(dead_code)]
     pub fn reset(&self) {
 
         let mut internal = self.internal.borrow_mut();
@@ -73,6 +73,7 @@ impl BumpAllocator {
         internal.last_idx = 0;
     }
 
+    #[allow(dead_code)]
     pub fn clear(&self) {
 
         let mut internal = self.internal.borrow_mut();
@@ -85,6 +86,7 @@ impl BumpAllocator {
         }
     }
 
+    #[allow(dead_code)]
     pub fn destroy(&self) {
 
         let mut internal = self.internal.borrow_mut();

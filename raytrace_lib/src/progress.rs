@@ -79,14 +79,13 @@ pub fn create_ctx(threads: usize, width: usize, height: usize, enable_io: bool) 
 
 impl ProgressCtx {
 
-    pub fn update(&mut self, tnum: usize, row: usize, pixels: usize, rays: usize, runstats: &HashMap<String, ProgressStat>) {
+    pub fn update(&mut self, tnum: usize, row: usize, pixels: usize, runstats: &HashMap<String, ProgressStat>) {
 
         let elapsed = time::Instant::now() - self.start_time;
         let secs = elapsed.as_secs();
         let sub_millis = elapsed.subsec_millis();
 
         self.finished_pixels += pixels;
-        // self.total_rays += rays;
         if runstats.contains_key("Rays") {
             self.total_rays += runstats.get("Rays").unwrap().as_count();
         }

@@ -44,7 +44,7 @@ fn parse_obj_line(line: &str, ctx: &mut ObjFile) {
     }
 }
 
-pub fn parse_obj(path: &str, startid: usize, offset: &Vec3, scale: f32, transform: (Vec3, Vec3, Vec3), surface: &SurfaceKind, edge_thickness: f32) -> Vec<Triangle> {
+pub fn parse_obj(path: &str, offset: &Vec3, scale: f32, transform: (Vec3, Vec3, Vec3), surface: &SurfaceKind, edge_thickness: f32) -> Vec<Triangle> {
 
     let mut ctx = ObjFile {
         vertices: Vec::new(),
