@@ -176,7 +176,7 @@ fn main() -> Result<()> {
     // let _ = raytrace::write_png(file, (1, 1), &data);
 
     let mut data = vec![make_vec(&[0., 0., 0.]); (width*height) as usize ];
-    let progress_ctx = caster.walk_rays(&v, &s, &mut data, 1, true);
+    let progress_ctx = caster.walk_rays(&v, &s, &mut data, 12, true);
     progress_ctx.print_stats();
     let _ = raytrace::write_png(file, (width, height), &data);
 

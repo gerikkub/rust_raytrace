@@ -1,11 +1,12 @@
 
+use raytrace_lib::progress;
 use raytrace_lib::progress::ProgressStat;
-use raytrace_lib::raytrace::{make_vec, make_color, make_disk, make_sphere, make_triangle,
-                             BoundingBox, CollisionFace, Color, DefaultRayCaster, LightSource,
-                             Point, Ray, Scene, SurfaceKind, Triangle, Vec3, Viewport};
+use raytrace_lib::raytrace::{make_vec, make_color, make_disk, BoundingBox, CollisionFace,
+                             Color, Point, Ray, Scene, SurfaceKind, Triangle, Vec3, Viewport};
 use raytrace_lib::obj_parser;
 use raytrace_lib::raytrace;
 use raytrace_lib::raytrace::RayCaster;
+use std::sync::mpsc::{channel, Sender};
 
 use std::time;
 use std::fs;
@@ -13,7 +14,7 @@ use std::io::Result;
 use std::path::Path;
 use std::collections::HashMap;
 
-use ffi::CudaTriangle;
+// use ffi::CudaTriangle;
 
 #[cxx::bridge]
 mod ffi {
@@ -39,20 +40,20 @@ mod ffi {
     }
 
 
-    extern "Rust" {
+//     extern "Rust" {
 
-        type CudaRayCaster;
+//         type CudaRayCaster;
 
-    }
+//     }
 
-    unsafe extern "C++" {
-        include!("cuda_raytrace/src/cuda_rt.h");
+//     unsafe extern "C++" {
+//         include!("cuda_raytrace/src/cuda_rt.h");
 
-        fn preload_triangles_cuda(tris: &Vec<CudaTriangle>);
+//         fn preload_triangles_cuda(tris: &Vec<CudaTriangle>);
 
-        fn project_ray_cuda<'a>(r: &CudaRay, objs: &Vec<usize>, ignore_objid: usize,
-                                depth: usize, runtimes: &mut [u64; 3]) -> CudaColor;
-    }
+//         // fn walk_rays_cuda<'a>(r: &CudaRay, objs: &Vec<usize>, ignore_objid: usize,
+//         //                       depth: usize, runtimes: &mut [u64; 3]) -> CudaColor;
+//     }
 
 }
 
@@ -96,52 +97,38 @@ struct CudaRayCaster {
 //     }
 // }
 
-// impl RayCaster for CudaRayCaster {
-//     fn project_ray(&self, r: &Ray, s: &Scene, ignore_objid: usize,
-//                    depth: usize, runtimes: &mut HashMap<String, ProgressStat>) -> Color {
+impl RayCaster for CudaRayCaster {
+    fn walk_rays_internal(&self, v: &Viewport, s: &Scene,
+                          data: & mut[Color], threads: usize,
+                          progress_tx: Sender<(usize, usize, usize, HashMap<String, ProgressStat>)>) {
 
-//         if depth == 0 {
-//             return Vec3(0., 0., 0.);
-//         }
+        let blue = make_color((128, 178, 255));
 
-//         let blue = Vec3(0.5, 0.7, 1.);
-//         blue
+        for idx in 0..data.len() {
+            data[idx] = blue;
+        }
 
-//         // let t1 = raytrace::get_thread_time();
+        // let t1 = raytrace::get_thread_time();
 
-//         // let mut path: Vec<BoundingBox> = Vec::new();
-//         // let hm_objs = s.boxes.get_all_objects_for_ray(&s.tris, r, &mut path);
-//         // let cuda_objs: Vec<usize> = Vec::from_iter(hm_objs.iter().map(|i| i as usize));
+        // let mut path: Vec<BoundingBox> = Vec::new();
+        // let hm_objs = s.boxes.get_all_objects_for_ray(&s.tris, r, &mut path);
+        // let cuda_objs: Vec<usize> = Vec::from_iter(hm_objs.iter().map(|i| i as usize));
 
-//         // let t2 = raytrace::get_thread_time();
+        // let t2 = raytrace::get_thread_time();
         
-//         // let mut cuda_runtimes = [0 as u64; 3];
-//         // let c = ffi::project_ray_cuda(&(*r).into(), &cuda_objs, ignore_objid, depth, &mut cuda_runtimes).into();
-//         // let t3 = raytrace::get_thread_time();
+        // let mut cuda_runtimes = [0 as u64; 3];
+        // let c = ffi::project_ray_cuda(&(*r).into(), &cuda_objs, ignore_objid, depth, &mut cuda_runtimes).into();
+        // let t3 = raytrace::get_thread_time();
 
-//         // *runtimes.entry("BoundingBox".to_string()).or_default() += time::Duration::from_nanos((t2-t1) as u64);
-//         // *runtimes.entry("Cuda Intersections".to_string()).or_default() += time::Duration::from_nanos((t3-t2) as u64);
-//         // *runtimes.entry("Cuda Pre Memcpy".to_string()).or_default() += time::Duration::from_nanos(cuda_runtimes[0]);
-//         // *runtimes.entry("Cuda Execute".to_string()).or_default() += time::Duration::from_nanos(cuda_runtimes[1]);
-//         // *runtimes.entry("Cuda Post Memcpy".to_string()).or_default() += time::Duration::from_nanos(cuda_runtimes[2]);
+        // *runtimes.entry("BoundingBox".to_string()).or_default() += time::Duration::from_nanos((t2-t1) as u64);
+        // *runtimes.entry("Cuda Intersections".to_string()).or_default() += time::Duration::from_nanos((t3-t2) as u64);
+        // *runtimes.entry("Cuda Pre Memcpy".to_string()).or_default() += time::Duration::from_nanos(cuda_runtimes[0]);
+        // *runtimes.entry("Cuda Execute".to_string()).or_default() += time::Duration::from_nanos(cuda_runtimes[1]);
+        // *runtimes.entry("Cuda Post Memcpy".to_string()).or_default() += time::Duration::from_nanos(cuda_runtimes[2]);
 
-//         // c
-//     }
-
-//     fn color_ray(&self, _r: &Ray, _s: &Scene, _objidx: usize,
-//                 _point: &Point, _face: &CollisionFace, _depth: usize,
-//                 _runtimes: &mut HashMap<String, ProgressStat>) -> Color {
-//         raytrace::make_color((255, 0, 0))
-//     }
-// }
-
-// fn preload_triangles(tris: &Vec<Triangle>) {
-//     let cuda_tris: Vec<CudaTriangle> = Vec::from_iter(tris.iter().map(
-//                         |t| {
-//                             (*t).into()
-//                         }));
-//     ffi::preload_triangles_cuda(&cuda_tris);
-// }
+        // c
+    }
+}
 
 fn optimize(tris: &Vec<Triangle>, v: &Viewport, initial: (usize, usize)) {
 
@@ -199,11 +186,11 @@ fn run_iteration(tris: &Vec<Triangle>, v: &Viewport, initial: (usize, usize)) ->
         boxes: bbox,
     };
 
-    let caster = DefaultRayCaster {};
+    let caster = CudaRayCaster {};
 
     let mut data = vec![make_vec(&[0., 0., 0.]); (v.width*v.height) as usize ];
     let t1 = time::Instant::now();
-    v.walk_rays(&s, &mut data, 16, &caster, false);
+    caster.walk_rays(&v, &s, &mut data, 16, false);
     let t2 = time::Instant::now();
 
     t2-t1
@@ -237,27 +224,14 @@ fn main() -> Result<()> {
     // let height = 1;
 
     let mut obj_data: Vec<Triangle> = Vec::new();
-    obj_data.extend(obj_parser::parse_obj("teapot_tri.obj", 10,
+    obj_data.extend(obj_parser::parse_obj("teapot_tri.obj",
                                          &make_vec(&[0., 0.5, 5.]),
                                          1.0,
                                          raytrace::create_transform(&make_vec(&[0., 0.3, 1.]).unit(),
                                                                     270_f32.to_radians()),
-                                        //  &SurfaceKind::Solid { color: make_color((252, 119, 0))},
                                          &SurfaceKind::Matte { color: make_color((252, 119, 0)),
                                                                alpha: 0.2 },
                                          0.05));
-
-    // obj_data.extend(obj_parser::parse_obj("teapot_tri.obj", 10,
-    //                                      &make_vec(&[1., -1.5, 4.]),
-    //                                      1.0,
-    //                                      raytrace::create_transform(&make_vec(&[0., 0.3, 1.]).unit(),
-    //                                                                 270_f32.to_radians()),
-    //                                      &SurfaceKind::Solid { color: make_color((200, 119, 80))},
-    //                                      0.02));
-
-    // let obj_data = make_sphere(&Vec3(2., 0., 5.), 1., (10, 30),
-    //                            &SurfaceKind::Solid { color: make_color((0, 200, 100))},
-    //                            0.);
 
     let v = raytrace::create_viewport((width, height),
                             (1., 1. * aspect),
@@ -273,7 +247,6 @@ fn main() -> Result<()> {
                               2.,
                               0.1,
                               50,
-                            //   &SurfaceKind::Solid { color: make_color((0, 252, 119))},
                               &SurfaceKind::Reflective { scattering: 0.0002,
                                            color: make_color((230, 230, 230)),
                                            alpha: 0.7 },
@@ -286,8 +259,6 @@ fn main() -> Result<()> {
                               1.,
                               0.04,
                               50,
-                            //   &SurfaceKind::Solid { color: make_color((0, 119, 252))},
-                            //   &SurfaceKind::Solid { color: make_color((0, 119, 252))},
                               &SurfaceKind::Reflective { scattering: 0.002,
                                            color: make_color((230, 230, 230)),
                                            alpha: 0.7 },
@@ -298,7 +269,6 @@ fn main() -> Result<()> {
     // optimize(&obj_data, &v, (10, 15));
     // return Ok(());
 
-    // let bbox = raytrace::build_empty_box();
     // let bbox = raytrace::build_trivial_bounding_box(&obj_data,
     //                                         &make_vec(&[0., 0., 0.]),
     //                                         20.);
@@ -308,30 +278,20 @@ fn main() -> Result<()> {
                                             7,
                                             19);
 
-
-    // let light_orig = Vec3(7., 15., 4.);
-
-    // preload_triangles(&obj_data);
-    // bbox.print_tree();
-
     let s = Scene {
         tris: obj_data,
         boxes: bbox,
-        // otherobjs: otherobjs,
-        // lights: light
-        // lights:  None
     };
 
 
-    // let caster = CudaRayCaster {};
-    let caster = DefaultRayCaster {};
+    let caster = CudaRayCaster {};
 
     // let mut data = vec![make_vec(&[0., 0., 0.]); 1 as usize ];
     // let progress_ctx = v.walk_one_ray(&s, &mut data, (416, 130), &caster);
     // let _ = raytrace::write_png(file, (1, 1), &data);
 
     let mut data = vec![make_vec(&[0., 0., 0.]); (width*height) as usize ];
-    let progress_ctx = v.walk_rays(&s, &mut data, 1, &caster, true);
+    let progress_ctx = caster.walk_rays(&v, &s, &mut data, 1, true);
     progress_ctx.print_stats();
     let _ = raytrace::write_png(file, (width, height), &data);
 

@@ -149,7 +149,7 @@ impl ProgressCtx {
                 );
         for (k, v) in &self.runtimes {
             match v {
-                ProgressStat::Time(d) => println!("{}: {}.{:0>6}", k, d.as_secs(), d.subsec_micros()),
+                ProgressStat::Time(d) => println!("{}: {}.{:0>3}", k, d.as_secs(), d.subsec_millis()),
                 ProgressStat::Count(c) => println!("{}: {}", k, c)
             }
         }

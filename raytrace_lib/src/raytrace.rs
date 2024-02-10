@@ -1113,21 +1113,12 @@ pub fn get_thread_time() -> i64 {
 }
 
 pub trait RayCaster: Send + Sync {
+    fn walk_rays_internal(&self, v: &Viewport, s: &Scene,
+                          data: &mut[Color], threads: usize,
+                          progress_tx: Sender<(usize, usize, usize, HashMap<String, ProgressStat>)>);
+                        
     fn walk_rays(&self, v: &Viewport, s: &Scene,
                  data: &mut[Color], threads: usize,
-                 show_progress: bool) -> progress::ProgressCtx;
-}
-
-#[derive(Copy,Clone)]
-pub struct DefaultRayCaster {
-}
-
-unsafe impl Send for DefaultRayCaster {}
-unsafe impl Sync for DefaultRayCaster {}
-
-impl RayCaster for DefaultRayCaster {
-    fn walk_rays(&self, v: &Viewport, s: &Scene,
-                 data: & mut[Color], threads: usize,
                  show_progress: bool) -> progress::ProgressCtx {
 
         let (progress_tx, progress_rx) = channel();
@@ -1136,17 +1127,10 @@ impl RayCaster for DefaultRayCaster {
 
         thread::scope(|sc| {
 
-            let data_parts: Arc<Mutex<VecDeque<(&mut [Color], usize)>>> = 
-                Arc::new(Mutex::new(VecDeque::from(
-                    data.chunks_mut(v.width).zip(0..v.height).collect::<VecDeque<(&mut [Color], usize)>>())));
-
-            for t in 0..threads {
-                let t_progress_tx = progress_tx.clone();
-                let t_parts = Arc::clone(&data_parts);
-                sc.spawn(move || {
-                    v.walk_ray_set(s, t_parts, t, t_progress_tx);
-                });
-            }
+            let t_progress_tx = progress_tx.clone();
+            sc.spawn(move || {
+                self.walk_rays_internal(v, s, data, threads, t_progress_tx);
+            });
 
             drop(progress_tx);
             'waitloop: loop {
@@ -1166,6 +1150,38 @@ impl RayCaster for DefaultRayCaster {
         progress_io
     }
 }
+
+#[derive(Copy,Clone)]
+pub struct DefaultRayCaster {
+}
+
+unsafe impl Send for DefaultRayCaster {}
+unsafe impl Sync for DefaultRayCaster {}
+
+impl RayCaster for DefaultRayCaster {
+    fn walk_rays_internal(&self, v: &Viewport, s: &Scene,
+                 data: & mut[Color], threads: usize,
+                 progress_tx: Sender<(usize, usize, usize, HashMap<String, ProgressStat>)>) {
+
+        thread::scope(|sc| {
+
+            let data_parts: Arc<Mutex<VecDeque<(&mut [Color], usize)>>> = 
+                Arc::new(Mutex::new(VecDeque::from(
+                    data.chunks_mut(v.width).zip(0..v.height).collect::<VecDeque<(&mut [Color], usize)>>())));
+
+            for t in 0..threads {
+                let t_progress_tx = progress_tx.clone();
+                let t_parts = Arc::clone(&data_parts);
+                sc.spawn(move || {
+                    v.walk_ray_set(s, t_parts, t, t_progress_tx);
+                });
+            }
+
+            drop(progress_tx);
+        });
+    }
+}
+
 
 fn color_ray(r: &Ray, s: &Scene, objidx: usize,
              point: &Point, face: &CollisionFace, depth: usize,
