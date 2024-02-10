@@ -232,6 +232,10 @@ fn main() -> Result<()> {
     // let width = 160;
     // let height = 120;
 
+    // let aspect = 1. / 1.;
+    // let width = 1;
+    // let height = 1;
+
     let mut obj_data: Vec<Triangle> = Vec::new();
     obj_data.extend(obj_parser::parse_obj("teapot_tri.obj", 10,
                                          &make_vec(&[0., 0.5, 5.]),
@@ -239,7 +243,7 @@ fn main() -> Result<()> {
                                          raytrace::create_transform(&make_vec(&[0., 0.3, 1.]).unit(),
                                                                     270_f32.to_radians()),
                                          &SurfaceKind::Solid { color: make_color((252, 119, 0))},
-                                         0.02));
+                                         0.05));
 
     // obj_data.extend(obj_parser::parse_obj("teapot_tri.obj", 10,
     //                                      &make_vec(&[1., -1.5, 4.]),
@@ -259,20 +263,15 @@ fn main() -> Result<()> {
                             &make_vec(&[0., 0., 1.]).unit(),
                             90.,
                             0_f32.to_radians(),
-                            2,
-                            20);
-
-    // println!("Viewport: {:?}", v);
-    
-
+                            5,
+                            30);
 
     obj_data.extend(make_disk(&make_vec(&[4., 4., 7.]),
                               &make_vec(&[-0.3, -0.55, -0.5]).unit(),
-                            //   &Vec3(0., 0., -1.).unit(),
                               2.,
                               0.1,
                               50,
-                            //   &SurfaceKind::Solid { color: make_color((252, 119, 0))},
+                            //   &SurfaceKind::Solid { color: make_color((0, 252, 119))},
                               &SurfaceKind::Reflective { scattering: 0.0002,
                                            color: make_color((230, 230, 230)),
                                            alpha: 0.7 },
@@ -281,32 +280,37 @@ fn main() -> Result<()> {
                               -1.));
 
     obj_data.extend(make_disk(&make_vec(&[4., -3., 5.]),
-                              &make_vec(&[-0.5, 1.0, -0.5]).unit(),
+                              &make_vec(&[-0.5, 2.0, -0.5]).unit(),
                               1.,
                               0.04,
                               50,
+                            //   &SurfaceKind::Solid { color: make_color((0, 119, 252))},
+                            //   &SurfaceKind::Solid { color: make_color((0, 119, 252))},
                               &SurfaceKind::Reflective { scattering: 0.002,
                                            color: make_color((230, 230, 230)),
                                            alpha: 0.7 },
                               &SurfaceKind::Matte { color: make_color((40, 40, 40)),
                                            alpha: 0.2 },
                               -1.));
+
     // optimize(&obj_data, &v, (9, 30));
     // return Ok(());
 
     // let bbox = raytrace::build_empty_box();
     // let bbox = raytrace::build_trivial_bounding_box(&obj_data,
-    //                                         &Vec3(0., 0., 0.),
+    //                                         &make_vec(&[0., 0., 0.]),
     //                                         20.);
     let bbox = raytrace::build_bounding_box(&obj_data,
-                                            &make_vec(&[0., 0., 0.]),
+                                            &make_vec(&[0., 0., 20.1]),
                                             20.,
-                                            6,
-                                            35);
+                                            10,
+                                            15);
+
 
     // let light_orig = Vec3(7., 15., 4.);
 
     // preload_triangles(&obj_data);
+    // bbox.print_tree();
 
     let s = Scene {
         tris: obj_data,
@@ -320,11 +324,14 @@ fn main() -> Result<()> {
     // let caster = CudaRayCaster {};
     let caster = DefaultRayCaster {};
 
+    // let mut data = vec![make_vec(&[0., 0., 0.]); 1 as usize ];
+    // let progress_ctx = v.walk_one_ray(&s, &mut data, (416, 130), &caster);
+    // let _ = raytrace::write_png(file, (1, 1), &data);
+
     let mut data = vec![make_vec(&[0., 0., 0.]); (width*height) as usize ];
-    let progress_ctx = v.walk_rays(&s, &mut data, 16, &caster, true);
-
+    let progress_ctx = v.walk_rays(&s, &mut data, 12, &caster, true);
     progress_ctx.print_stats();
-
     let _ = raytrace::write_png(file, (width, height), &data);
+
     return Ok(());
 }

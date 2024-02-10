@@ -10,7 +10,6 @@ struct ObjPolygon {
 
 struct ObjFile {
     vertices: Vec<Vec3>,
-    // norms: Vec<Vec<Vec3>>,
     faces: Vec<ObjPolygon>
 }
 

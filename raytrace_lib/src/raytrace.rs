@@ -3,15 +3,17 @@ use core::num;
 use core::panic;
 use core::slice::SlicePattern;
 use std::alloc::alloc;
+use std::mem;
 use std::time;
 use std::fs;
 use std::io;
 use std::io::Result;
 use std::thread;
+use std::cmp::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::mpsc::{channel, Sender};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque, BTreeMap};
 use syscalls::{Sysno, syscall};
 use std::f32::consts::{PI, FRAC_PI_4, FRAC_PI_2};
 use std::simd::*;
@@ -19,6 +21,7 @@ use std::simd::num::SimdFloat;
 use std::mem::size_of;
 use std::alloc::Allocator;
 use log::debug;
+use ordered_float::OrderedFloat;
 
 use crate::progress;
 use crate::bitset::BitSet;
@@ -58,6 +61,13 @@ impl Vec3 {
     pub fn mult(&self, a: f32) -> Vec3 {
         Vec3 {
              v: f32x4::from_array(self.v.to_array().map(|x| x * a))
+        }
+    }
+
+    #[inline(always)]
+    pub fn mult_per(&self, other: &Vec3) -> Vec3 {
+        Vec3 {
+             v: self.v * other.v
         }
     }
 
@@ -196,12 +206,13 @@ pub struct Ray {
 }
 
 pub fn make_ray(orig: &Point, dir: &Vec3) -> Ray {
+    let dir_unit = dir.unit();
     Ray {
         orig: *orig,
-        dir: *dir,
-        inv_dir: make_vec(&[1./dir.v[0],
-                            1./dir.v[1],
-                            1./dir.v[2]])
+        dir: dir_unit,
+        inv_dir: make_vec(&[1./dir_unit.v[0],
+                            1./dir_unit.v[1],
+                            1./dir_unit.v[2]])
     }
 }
 
@@ -280,14 +291,16 @@ fn reflect_ray(orig: &Point, norm: &Vec3, dir: &Vec3, fuzz: f32) -> Ray {
     let reflect = dir_p.add(&dir_o);
     let rand_vec = random_vec().mult(fuzz);
 
-    make_ray(orig, &reflect.add(&rand_vec).unit())
+    let reflect_dir = &reflect.add(&rand_vec).unit();
+
+    make_ray(&orig.add(&reflect_dir.mult(0.001)), &reflect.add(&rand_vec).unit())
 }
 
 fn lambertian_ray(orig: &Point, norm: &Vec3) -> Ray {
 
     let rand_vec = random_vec();
 
-    make_ray(orig, &norm.add(&rand_vec))
+    make_ray(&orig.add(&rand_vec.mult(0.001)), &norm.add(&rand_vec))
 }
 
 fn mix_color(c1: &Color, c2: &Color, a: f32) -> Color {
@@ -322,9 +335,9 @@ pub trait Collidable {
 pub struct Triangle {
     pub incenter: Point,
     pub norm: Vec3,
+    pub bounding_r2: f32,
     pub sides: [Vec3; 3],
     pub side_lens: [f32; 3],
-    // sides: [(Vec3, f64); 3],
     pub corners: [Vec3; 3],
     pub surface: SurfaceKind,
     pub edge_thickness: f32,
@@ -358,7 +371,6 @@ pub fn make_triangle(points: &[Vec3; 3], surface: &SurfaceKind, edge_thickness: 
         let oc = pc.sub(&po);
         sides[idx] = oc.unit();
         side_lens[idx] = oc.len();
-        // sides.push((oc.unit(), oc.len()));
     }
 
     let norm = sides[0].cross(&sides[1]).unit();
@@ -366,7 +378,7 @@ pub fn make_triangle(points: &[Vec3; 3], surface: &SurfaceKind, edge_thickness: 
     Triangle {
         incenter: incenter,
         norm: norm,
-        // bounding_r2: bounding_len2,
+        bounding_r2: points.iter().fold(0.0_f32, | acc, elem | acc.max(elem.sub(&incenter).len2())),
         sides: sides,
         side_lens: side_lens,
         corners: points.clone(),
@@ -520,38 +532,6 @@ pub fn intersect_triangle_list(r: &Ray, objs: BitSet, tris: &[Triangle], allocat
     }
 
     out_vec
-    
-    // dists_list.iter().zip(tri_sidelens)
-    //                                 .zip(tri_edgets)
-    //                                 .zip(tri_norms)
-    //                                 .zip(p_list)
-    //                                 .zip(t_list)
-    //                                 .zip(objs.iter()).map(
-    //     |((((((dists, sidelens), edgethickness), norm), p), t), idx)| {
-    //         let front = r.dir.dot(&norm) > 0.;
-    //         if t < 0. {
-    //             None
-    //         } else if dists[0] > sidelens[0] ||
-    //                   dists[1] > sidelens[1] ||
-    //                   dists[2] > sidelens[2] {
-    //             None
-    //         } else if dists[0] > (sidelens[0] * (1. - edgethickness)) ||
-    //                   dists[1] > (sidelens[1] * (1. - edgethickness)) ||
-    //                   dists[2] > (sidelens[2] * (1. - edgethickness)) {
-    //             if front {
-    //                 Some((t, p, CollisionFace::EdgeFront, idx as usize))
-    //             } else {
-    //                 Some((t, p, CollisionFace::EdgeBack, idx as usize))
-    //             }
-    //         } else {
-    //             if front {
-    //                 Some((t, p, CollisionFace::Front, idx as usize))
-    //             } else {
-    //                 Some((t, p, CollisionFace::Back, idx as usize))
-    //             }
-    //         }
-    //     }).collect()
-    
 }
 
 impl Collidable for Triangle {
@@ -565,26 +545,19 @@ impl Collidable for Triangle {
 
         let ip = p.sub(&self.incenter);
 
-        // if ip.len2() > self.bounding_r2 {
-        //     return None;
-        // }
+        if ip.len2() > self.bounding_r2 {
+            return None;
+        }
 
         let mut hit_edge = false;
         for (side, side_len) in self.sides.iter().zip(self.side_lens) {
             let dist =  ip.dot(&side);
-            // println!("{:?} {} {:?} {:?}", dist, side_len, side, ip);
             if dist > side_len {
                 return None;
             } else if dist > (side_len * (1. - self.edge_thickness)) {
                 hit_edge = true;
             }
         }
-
-        // if ip.dot(&self.side_a) > self.side_a_d ||
-        //    ip.dot(&self.side_b) > self.side_b_d ||
-        //    ip.dot(&self.side_c) > self.side_c_d {
-        //     return None;
-        // }
 
         let side = if hit_edge {
             if r.dir.dot(&self.norm) > 0. {
@@ -599,18 +572,6 @@ impl Collidable for Triangle {
                 CollisionFace::Front
             }
         };
-
-        // let side = if ip.dot(&self.side_a) > self.side_a_d*self.edge ||
-        //               ip.dot(&self.side_b) > self.side_b_d*self.edge ||
-        //               ip.dot(&self.side_c) > self.side_c_d*self.edge {
-        //     CollisionFace::Edge
-        // } else {
-        //     if r.dir.dot(&self.norm) > 0. {
-        //         CollisionFace::Back
-        //     } else {
-        //         CollisionFace::Front
-        //     }
-        // };
 
         Some((t, p, side))
     }
@@ -638,40 +599,6 @@ impl Collidable for Triangle {
 }
 
 
-// #[derive(Clone, Debug)]
-// pub enum CollisionObject {
-//     Sphere(Sphere),
-//     Triangle(Triangle),
-//     Disk(Disk),
-// }
-
-// impl Collidable for CollisionObject {
-//     fn intersects(&self, r: &Ray) -> Option<(f64, Point, CollisionFace)> {
-//         match self {
-//             CollisionObject::Sphere(s) => s.intersects(r),
-//             CollisionObject::Triangle(t) => t.intersects(r),
-//             CollisionObject::Disk(d) => d.intersects(r),
-//         }
-//     }
-
-//     fn normal(&self, p: &Point, f: &CollisionFace) -> Vec3 {
-//         match self {
-//             CollisionObject::Sphere(s) => s.normal(p, f),
-//             CollisionObject::Triangle(t) => t.normal(p, f),
-//             CollisionObject::Disk(d) => d.normal(p, f),
-//         }
-//     }
-
-//     fn getsurface(&self, f: &CollisionFace) -> SurfaceKind {
-//         match self {
-//             CollisionObject::Sphere(s) => s.getsurface(f),
-//             CollisionObject::Triangle(t) => t.getsurface(f),
-//             CollisionObject::Disk(d) => d.getsurface(f),
-//         }
-//     }
-
-// }
-
 pub fn make_sphere(orig: &Point, r: f32, lat_lon: (usize, usize), surface: &SurfaceKind, edge_thickness: f32) -> Vec<Triangle> {
 
     let num_lat = lat_lon.0;
@@ -683,9 +610,6 @@ pub fn make_sphere(orig: &Point, r: f32, lat_lon: (usize, usize), surface: &Surf
 
     for lat_idx in 0..num_lat {
         for lon_idx in 0..num_lon {
-
-            // let top_point = orig.add(&Vec3(r, 0., 0.));
-            // let bottom_point = orig.add(&Vec3(-1.*r, 0., 0.));
 
             let phi1 = (if lat_idx % 2 == 0 {
                 (lat_idx as f32) / (num_lat as f32) * PI
@@ -750,7 +674,6 @@ pub fn make_disk(orig: &Point, norm: &Vec3, r: f32, d: f32, num_tris: usize,
 
     let norm_orth0 = norm.orthogonal().unit().mult(r);
     let norm_orth1 = norm.cross(&norm_orth0).unit().mult(r);
-    println!("{:?} {:?} {:?}\n", norm, norm_orth0, norm_orth1);
 
     // let smudge = 2. * PI / 1000.;
     let smudge = 0.;
@@ -792,8 +715,8 @@ pub fn make_disk(orig: &Point, norm: &Vec3, r: f32, d: f32, num_tris: usize,
                       .add(&norm_orth0.mult(theta4.sin()))
                       .add(&norm_orth1.mult(theta4.cos()));
 
-        // tris.push(make_triangle(&[p1m, p2m, p3m],
-        //                         surface, edge_thickness));
+        tris.push(make_triangle(&[p1m, p2m, p3m],
+                                surface, edge_thickness));
         
         // Side Face
         tris.push(make_triangle(&[p2p, p3p, p2m],
@@ -825,12 +748,17 @@ pub struct LightSource {
 //     }
 // }
 
-#[repr(C)]
+#[derive(Clone)]
+enum BBSubobj {
+    Boxes(Vec<BoundingBox>),
+    Tris(Vec<usize>),
+    Empty
+}
+
 pub struct BoundingBox {
     pub orig: Point,
     pub len2: f32,
-    pub objs: BitSet,
-    pub child_boxes: Vec<BoundingBox>,
+    pub objs: BBSubobj,
     pub depth: usize
 }
 
@@ -840,7 +768,6 @@ impl Clone for BoundingBox {
             orig: self.orig,
             len2: self.len2,
             objs: self.objs.clone(),
-            child_boxes: self.child_boxes.clone(),
             depth: self.depth
         }
     }
@@ -857,8 +784,6 @@ fn box_contains_point(orig: &Point, len2: f32, p: &Point) -> bool {
 
 fn face_contains_triangle(p: &Point, norm: &Vec3, len2: f32, t: &Triangle) -> bool {
     
-    // println!("{:?} {:?} {}", p, norm ,len2);
-
     let h1 = norm.dot(&p.add(&norm.mult(len2)));
     let h2 = t.norm.dot(&t.incenter);
     let n1 = norm;
@@ -877,7 +802,6 @@ fn face_contains_triangle(p: &Point, norm: &Vec3, len2: f32, t: &Triangle) -> bo
         let t1 = (p.v[0] - len2 - line_tmp.orig.v[0]) * line_tmp.inv_dir.v[0];
         let t2 = (p.v[0] + len2 - line_tmp.orig.v[0]) * line_tmp.inv_dir.v[0];
 
-        // println!("0: t1 t2: {} {}", t1, t2);
         tmin = f32::min(tmin, f32::min(t1, t2));
     };
 
@@ -885,7 +809,6 @@ fn face_contains_triangle(p: &Point, norm: &Vec3, len2: f32, t: &Triangle) -> bo
         let t1 = (p.v[1] - len2 - line_tmp.orig.v[1]) * line_tmp.inv_dir.v[1];
         let t2 = (p.v[1] + len2 - line_tmp.orig.v[1]) * line_tmp.inv_dir.v[1];
 
-        // println!("1: t1 t2: {} {}", t1, t2);
         tmin = f32::min(tmin, f32::min(t1, t2));
     };
 
@@ -893,20 +816,14 @@ fn face_contains_triangle(p: &Point, norm: &Vec3, len2: f32, t: &Triangle) -> bo
         let t1 = (p.v[2] - len2 - line_tmp.orig.v[2]) * line_tmp.inv_dir.v[2];
         let t2 = (p.v[2] + len2 - line_tmp.orig.v[2]) * line_tmp.inv_dir.v[2];
 
-        // println!("2: t1 t2: {} {}", t1, t2);
         tmin = f32::min(tmin, f32::min(t1, t2));
     };
-
-    // println!("tmin: {}", tmin);
 
     let line = if tmin > 0. {
         line_tmp
     } else {
-        // println!("p: {:?}", line_tmp.at(tmin * 2.));
         make_ray(&line_tmp.at(tmin * 2.), &line_tmp.dir)
     };
-
-    // println!("line: {:?}", line);
 
     // Check line collision with box
     tmin = f32::MIN;
@@ -915,7 +832,6 @@ fn face_contains_triangle(p: &Point, norm: &Vec3, len2: f32, t: &Triangle) -> bo
         let t1 = (p.v[0] - len2 - line.orig.v[0]) * line.inv_dir.v[0];
         let t2 = (p.v[0] + len2 - line.orig.v[0]) * line.inv_dir.v[0];
 
-        // println!("0: t1 t2: {} {}", t1, t2);
         tmin = f32::max(tmin, f32::min(t1, t2));
         tmax = f32::min(tmax, f32::max(t1, t2));
     };
@@ -924,7 +840,6 @@ fn face_contains_triangle(p: &Point, norm: &Vec3, len2: f32, t: &Triangle) -> bo
         let t1 = (p.v[1] - len2 - line.orig.v[1]) * line.inv_dir.v[1];
         let t2 = (p.v[1] + len2 - line.orig.v[1]) * line.inv_dir.v[1];
 
-        // println!("1: t1 t2: {} {}", t1, t2);
         tmin = f32::max(tmin, f32::min(t1, t2));
         tmax = f32::min(tmax, f32::max(t1, t2));
     };
@@ -933,12 +848,9 @@ fn face_contains_triangle(p: &Point, norm: &Vec3, len2: f32, t: &Triangle) -> bo
         let t1 = (p.v[2] - len2 - line.orig.v[2]) * line.inv_dir.v[2];
         let t2 = (p.v[2] + len2 - line.orig.v[2]) * line.inv_dir.v[2];
 
-        // println!("2: t1 t2: {} {}", tmin, tmax);
         tmin = f32::max(tmin, f32::min(t1, t2));
         tmax = f32::min(tmax, f32::max(t1, t2));
     };
-
-    // println!("tmin tmax: {} {}", tmin, tmax);
 
     if tmax < tmin {
         return false;
@@ -974,7 +886,6 @@ mod test {
                                &SurfaceKind::Solid { color: make_color((0,0,0)) },
                                0.0);
         
-// fn face_contains_triangle(p: &Point, norm: &Vec3, len2: f64, t: &Triangle) -> bool {
         assert!(face_contains_triangle(&orig, &norm, len2, &t));
 
     }
@@ -986,11 +897,11 @@ pub fn box_contains_polygon(orig: &Point, len2: f32, t: &Triangle) -> bool {
         return true;
     }
 
-    // for corner in &t.corners {
-    //     if box_contains_point(orig, len2, &corner) {
-    //         return true;
-    //     }
-    // }
+    for corner in &t.corners {
+        if box_contains_point(orig, len2, &corner) {
+            return true;
+        }
+    }
 
     // Check a ray for each edge of the cube
     let face_norms = [make_vec(&[1., 0., 0.]),
@@ -1006,95 +917,40 @@ pub fn box_contains_polygon(orig: &Point, len2: f32, t: &Triangle) -> bool {
     }
 
     false
-
-    // let ab_ray = make_ray(&t.corners[0], &t.corners[1].sub(&t.corners[0]));
-    // let ab_p = ab_ray.nearest_point(orig);
-    // let ap1 = ab_p.sub(&ab_ray.orig);
-    // let ab_v = ap1.dot(&ab_ray.dir);
-    // if box_contains_point(orig, len2, &ab_p) &&
-    //     ab_v >= 0. && ab_v < ab_ray.dir.len2() {
-    //     return true;
-    // }
-
-    // let ac_ray = make_ray(&t.corners[0], &t.corners[2].sub(&t.corners[0]));
-    // let ac_p = ac_ray.nearest_point(orig);
-    // let ap2 = ac_p.sub(&ac_ray.orig);
-    // let ac_v = ap2.dot(&ac_ray.dir);
-    // if box_contains_point(orig, len2, &ac_p) &&
-    //     ac_v >= 0. && ac_v < ac_ray.dir.len2() {
-    //     return true;
-    // }
-
-    // let bc_ray = make_ray(&t.corners[1], &t.corners[2].sub(&t.corners[1]));
-    // let bc_p = bc_ray.nearest_point(orig);
-    // let bp = bc_p.sub(&bc_ray.orig);
-    // let bc_v = bp.dot(&bc_ray.dir);
-    // if box_contains_point(orig, len2, &bc_p) &&
-    //     bc_v > 0. && bc_v < bc_ray.dir.len2() {
-    //     return true;
-    // }
-
-    // let edges: [(usize, usize); 12] = [
-    //     (0, 1), (0, 2), (0, 4),
-    //     (3, 1), (3, 2), (3, 7),
-    //     (5, 1), (5, 4), (5, 7),
-    //     (6, 2), (6, 4), (6, 7)
-    // ];
-
-    // for edge in edges {
-    //     let edge_ray = make_ray(&points[edge.0], &points[edge.1].sub(&points[edge.0]));
-    //     match t.intersects(&edge_ray) {
-    //         Some((tt, _, __)) => {
-    //             if tt >= 0. && tt <= 1. {
-    //                 return true;
-    //             }
-    //         }
-    //         None => {}
-    //     };
-    // }
 }
 
 pub fn build_empty_box() -> BoundingBox {
     BoundingBox {
         orig: make_vec(&[0., 0., 0.]),
         len2: 1.,
-        objs: BitSet::new(1),
-        child_boxes: Vec::new(),
+        objs: BBSubobj::Tris(Vec::new()),
         depth: 0
     }
 }
 
 pub fn build_bounding_box(tris: &Vec<Triangle>, orig: &Point, len2: f32, maxdepth: usize, minobjs: usize) -> BoundingBox {
-    let mut refvec = BitSet::new(tris.len());
-    refvec.extend(0..tris.len());
-    build_bounding_box_helper(tris, &refvec, orig, len2, 0, maxdepth, minobjs)
+    let mut refvec = (0..tris.len()).collect();
+    build_bounding_box_helper(tris, &refvec, orig, len2, 0, maxdepth, minobjs).unwrap()
 }
 
-fn build_bounding_box_helper(tris: &Vec<Triangle>, objs: &BitSet, orig: &Point, len2: f32, depth: usize, maxdepth: usize, minobjs: usize) -> BoundingBox {
+fn build_bounding_box_helper(tris: &Vec<Triangle>, objs: &Vec<usize>, orig: &Point, len2: f32, depth: usize, maxdepth: usize, minobjs: usize) -> Option<BoundingBox> {
 
-    let mut subobjs = BitSet::new(tris.len());
+    let mut subobjs: Vec<usize> = Vec::new();
     for idx in objs.iter() {
-        if box_contains_polygon(orig, len2, &tris[idx as usize]) {
-            subobjs.insert(idx);
+        if box_contains_polygon(orig, len2, &tris[*idx]) {
+            subobjs.push(*idx);
         }
     }
 
     if subobjs.len() == 0 {
-        return BoundingBox {
-            orig: *orig,
-            len2: len2,
-            objs: BitSet::new(1),
-            child_boxes: Vec::new(),
-            depth: depth
-        };
+        return None;
     } else if subobjs.len() < minobjs || depth >= maxdepth {
-        return BoundingBox {
+        return Some(BoundingBox {
             orig: *orig,
             len2: len2,
-            objs: subobjs,
-            child_boxes: Vec::new(),
+            objs: BBSubobj::Tris(subobjs),
             depth: depth
-        };
+        });
     }
 
     let mut subboxes: Vec<BoundingBox> = Vec::with_capacity(8);
@@ -1111,27 +967,31 @@ fn build_bounding_box_helper(tris: &Vec<Triangle>, objs: &BitSet, orig: &Point, 
                                              depth + 1,
                                              maxdepth,
                                              minobjs);
-        subboxes.push(bbox);
+        match bbox {
+            Some(b) => subboxes.push(b),
+            _ => {}
+        }
     }
 
-    BoundingBox {
-        orig: *orig,
-        len2: len2,
-        objs: BitSet::new(1),
-        child_boxes: subboxes,
-        depth: depth
+    if subboxes.len() > 0 {
+        Some(BoundingBox {
+            orig: *orig,
+            len2: len2,
+            objs: BBSubobj::Boxes(subboxes),
+            depth: depth
+        })
+    } else {
+        None
     }
 }
 
 pub fn build_trivial_bounding_box(tris: &Vec<Triangle>, orig: &Point, len2: f32) -> BoundingBox {
 
-    let mut allobjs = BitSet::new(tris.len());
-    allobjs.extend((0..tris.len()).into_iter());
+    let mut allobjs = (0..tris.len()).collect();
     BoundingBox {
         orig: *orig,
         len2: len2,
-        objs: allobjs,
-        child_boxes: Vec::new(),
+        objs: BBSubobj::Tris(allobjs),
         depth: 0
     }
 }
@@ -1174,79 +1034,269 @@ impl BoundingBox {
         op.dot(&ortho_vecs.1).abs() < self.len2
     }
 
-    pub fn collides(&self, r: &Ray) -> bool {
+    #[inline(never)]
+    pub fn collides(&self, r: &Ray) -> Option<(f32, f32)> {
     
         let mut tmin = f32::MIN;
         let mut tmax = f32::MAX;
-        if r.dir.v[0] != 0. {
-            let t1 = (self.orig.v[0] - self.len2 - r.orig.v[0]) * r.inv_dir.v[0];
-            let t2 = (self.orig.v[0] + self.len2 - r.orig.v[0]) * r.inv_dir.v[0];
 
-            tmin = f32::max(tmin, f32::min(t1, t2));
-            tmax = f32::min(tmax, f32::max(t1, t2));
+        let tmp1 = self.orig.sub(&r.orig).mult_per(&r.inv_dir);
+        let tmp2 = r.inv_dir.mult(self.len2);
+
+        let t1s = tmp1.sub(&tmp2);
+        let t2s = tmp1.add(&tmp2);
+
+        if r.dir.v[0] != 0. {
+            // let tmp = (self.orig.v[0] - r.orig.v[0]) * r.inv_dir.v[0];
+            // let tmp2 = self.len2 * r.inv_dir.v[0];
+
+            if r.inv_dir.v[0] > 0. {
+                tmin = t1s.v[0];
+                tmax = t2s.v[0];
+            } else {
+                tmin = t2s.v[0];
+                tmax = t1s.v[0];
+            }
         }
 
         if r.dir.v[1] != 0. {
-            let t1 = (self.orig.v[1] - self.len2 - r.orig.v[1]) * r.inv_dir.v[1];
-            let t2 = (self.orig.v[1] + self.len2 - r.orig.v[1]) * r.inv_dir.v[1];
+            // let t1 = (self.orig.v[1] - self.len2 - r.orig.v[1]) * r.inv_dir.v[1];
+            // let t2 = (self.orig.v[1] + self.len2 - r.orig.v[1]) * r.inv_dir.v[1];
 
-            tmin = f32::max(tmin, f32::min(t1, t2));
-            tmax = f32::min(tmax, f32::max(t1, t2));
+            if r.inv_dir.v[1] > 0. {
+                tmin = f32::max(tmin, t1s.v[1]);
+                tmax = f32::min(tmax, t2s.v[1]);
+            } else {
+                tmin = f32::max(tmin, t2s.v[1]);
+                tmax = f32::min(tmax, t1s.v[1]);
+            }
         }
 
         if r.dir.v[2] != 0. {
-            let t1 = (self.orig.v[2] - self.len2 - r.orig.v[2]) * r.inv_dir.v[2];
-            let t2 = (self.orig.v[2] + self.len2 - r.orig.v[2]) * r.inv_dir.v[2];
+            // let t1 = (self.orig.v[2] - self.len2 - r.orig.v[2]) * r.inv_dir.v[2];
+            // let t2 = (self.orig.v[2] + self.len2 - r.orig.v[2]) * r.inv_dir.v[2];
 
-            tmin = f32::max(tmin, f32::min(t1, t2));
-            tmax = f32::min(tmax, f32::max(t1, t2));
+            if r.inv_dir.v[2] > 0. {
+                tmin = f32::max(tmin, t1s.v[2]);
+                tmax = f32::min(tmax, t2s.v[2]);
+            } else {
+                tmin = f32::max(tmin, t2s.v[2]);
+                tmax = f32::min(tmax, t1s.v[2]);
+            }
         }
 
-        tmin < tmax
+        if tmin < tmax {
+            Some((tmin, tmax))
+        } else {
+            None
+        }
     }
 
-    pub fn get_all_objects_for_ray(&self, tris: &Vec<Triangle>, r: &Ray, path: &mut Vec<BoundingBox>) -> BitSet {
+    #[inline(never)]
+    fn get_object_intersection_for_ray(&self, tris: &Vec<Triangle>, r: &Ray) -> Option<(f32, Vec3, CollisionFace, usize)> {
 
-        let mut objmap = BitSet::new(tris.len());
+        // println!("BBx: {}", self.depth);
+        debug!("{}Bounding box: {}", " ".repeat(self.depth), self.debug_str());
+        match &self.objs {
+            BBSubobj::Empty => {
+                debug!("{} Empty", " ".repeat(self.depth));
+                None
+            }
+            BBSubobj::Tris(_subts) => {
+                debug!("{} Subobjects", " ".repeat(self.depth));
+                match self.get_box_min_time_intersection(tris, r) {
+                    Some(a) => {
+                        debug!("{} Min hit at {} with {}", " ".repeat(self.depth), a.0, a.3);
+                        Some(a)
+                    },
+                    None => {
+                        debug!("{} No hits", " ".repeat(self.depth));
+                        None
+                    }
+                }
+            },
+            BBSubobj::Boxes(subboxes) => {
+                debug!("{} Subboxes", " ".repeat(self.depth));
+                let mut boxmap: [((f32, f32), Option<&BoundingBox>); 8] = [((f32::MAX, f32::MAX), None); 8];
+                subboxes.iter().enumerate().for_each(
+                    |(idx, bbox)| {
+                        match bbox.collides(r) {
+                            Some((tmin, tmax)) => {
+                                boxmap[idx] = ((tmin, tmax), Some(&bbox));
+                            },
+                            _ => {}
+                        }
+                    });
 
-        self.get_all_objects_for_ray_helper(tris, r, &mut objmap, path);
-        objmap.update_bitcount();
+                // Insertion sort
+                for idx in 1..8 {
+                    let mut jdx = idx;
+                    while jdx > 0 && boxmap[jdx-1].0.0 > boxmap[jdx].0.0 {
+                        boxmap.swap(jdx-1, jdx);
+                        jdx -= 1;
+                    }
+                }
+
+                // for idx in 0..8 {
+                //     print!("{:.02} ", if boxmap[idx].0.0 == f32::MAX {
+                //         -1.
+                //     } else {
+                //         boxmap[idx].0.0 
+                //     });
+                // }
+                // println!("");
+
+                boxmap.iter().fold(((0., 0.), None),
+                    |((bboxtmin, bboxtmax), acc): ((f32, f32), Option<(f32, Vec3, CollisionFace, usize)>),
+                     ((tmin, tmax), bbox_opt): &((f32, f32), Option<&BoundingBox>) | {
+                        match &acc {
+                            Some(_) => {
+                                debug!("{} Min At {:.2} {:.2}", " ".repeat(self.depth), bboxtmin, bboxtmax);
+                            },
+                            None => {
+                                debug!("{} No hit yet", " ".repeat(self.depth));
+                            }
+                        };
+                        match &bbox_opt {
+                            Some(bbox) => {
+                                match &acc {
+                                    Some(acchit) => {
+                                        // if *tmin < (bboxtmax + 0.1) {
+                                        if *tmin < bboxtmax {
+                                            debug!("{} Checking1 Subbox at {} {} with: {}", " ".repeat(self.depth), tmin, tmax, bbox.debug_str());
+                                            let sub = bbox.get_object_intersection_for_ray(tris, r);
+                                            match &sub {
+                                                Some(subhit) => {
+                                                    if subhit.0 < acchit.0 {
+                                                        ((*tmin, subhit.0), sub)
+                                                    } else {
+                                                        ((bboxtmin, bboxtmax), acc)
+                                                    }
+                                                },
+                                                None => {
+                                                    ((bboxtmin, bboxtmax), acc)
+                                                }
+                                            }
+                                        } else {
+                                            debug!("{} Skipping {:.2} {:.2}", " ".repeat(self.depth), tmin, tmax);
+                                            ((bboxtmin, bboxtmax), acc)
+                                        }
+                                    },
+                                    None => {
+                                        if *tmin != f32::MAX {
+                                            debug!("{} Checking2 Subbox at {} {} with: {}", " ".repeat(self.depth), tmin, tmax, bbox.debug_str());
+                                            let sub = bbox.get_object_intersection_for_ray(tris, r);
+                                            match &sub {
+                                                Some(subhit) => {
+                                                    ((*tmin, subhit.0), sub)
+                                                },
+                                                None => {
+                                                    ((0., 0.), None)
+                                                }
+                                            }
+                                        } else {
+                                            ((0., 0.), None)
+                                        }
+                                    }
+                                }
+                            },
+                            None => {
+                                ((bboxtmin, bboxtmax), acc)
+                            }
+                        }
+                    }).1
+            }
+        }
+    }
+
+    #[inline(never)]
+    fn get_box_min_time_intersection(&self, tris: &Vec<Triangle>, r: &Ray) -> Option<(f32, Vec3, CollisionFace, usize)> {
+
+        match &self.objs {
+            BBSubobj::Tris(objtris) => {
+                objtris.iter().fold(None,
+                    |acc, tnum| {
+                        match tris[*tnum].intersects(r) {
+                            Some((t, p, face)) => {
+                                debug!("{}  Hit {} at {} {:?}", " ".repeat(self.depth), *tnum, t, p);
+                                match acc {
+                                    Some((tacc, _, _, _)) => {
+                                        if t < tacc {
+                                            Some((t, p, face, *tnum))
+                                        } else {
+                                            acc
+                                        }
+                                    },
+                                    None => {
+                                        Some((t, p, face, *tnum))
+                                    }
+                                }
+                            },
+                            None => {
+                                acc
+                            }
+                        }
+                    })
+            },
+            _ => panic!("Must have objects")
+        }
+
+    }
+
+    pub fn get_all_objects_for_ray(&self, tris: &Vec<Triangle>, r: &Ray) -> BTreeMap<OrderedFloat<f32>, Vec<usize>>  {
+
+        let mut objmap = BTreeMap::new();
+
+        self.get_all_objects_for_ray_helper(tris, r, &mut objmap);
 
         objmap
     }
 
-    fn get_all_objects_for_ray_helper(&self, tris: &Vec<Triangle>, r: &Ray, objmap: &mut BitSet, path: &mut Vec<BoundingBox>) {
-        if self.objs.len() == 0 &&
-           self.child_boxes.len() == 0{
-            return;
+    fn get_all_objects_for_ray_helper(&self, tris: &Vec<Triangle>, r: &Ray, objmap: &mut BTreeMap<OrderedFloat<f32>, Vec<usize>>) {
+        match &self.objs {
+            BBSubobj::Empty => return,
+            _ =>  {}
         }
-        if self.collides(r) {
-            objmap.orwith(&self.objs);
-
-            if self.child_boxes.len() > 0 {
-                for cbox in &self.child_boxes {
-                    cbox.get_all_objects_for_ray_helper(tris, r, objmap, path);
+        match self.collides(r) {
+            Some((tmin, tmax)) => {
+                match &self.objs {
+                    BBSubobj::Tris(tris) => {
+                        objmap.insert(OrderedFloat(tmin), tris.clone());
+                    },
+                    BBSubobj::Boxes(c) => {
+                        for cbox in c {
+                            cbox.get_all_objects_for_ray_helper(tris, r, objmap);
+                        }
+                    },
+                    _ => panic!("Should not be empty")
                 }
-            }
+            },
+            _ => {}
         }
     }
 
     pub fn print_tree(&self) {
-        self.print();
-        if self.child_boxes.len() > 0 {
-            for b in &self.child_boxes {
-                b.print_tree();
-            }
+        println!("Bx: {}", self.debug_str());
+        match &self.objs {
+            BBSubobj::Boxes(c) => {
+                for b in c {
+                    b.print_tree();
+                }
+            },
+            BBSubobj::Tris(ts) => {
+                for t in ts {
+                    println!("Obj {}", t);
+                }
+            },
+            _ => {}
         }
     }
 
-    pub fn print(&self) {
-        println!("BS: {} {:?} {} {} {}",
+    pub fn debug_str(&self) -> String {
+        format!("{} {:?} {}",
                  self.depth,
-                 self.orig, self.len2,
-                 self.objs.len(),
-                 self.child_boxes.len()
-                 );
+                 self.orig, self.len2
+                 )
     }
 
     // pub fn find_obj(&self, tris: &Vec<Triangle>, id: usize) -> Vec<&BoundingBox> {
@@ -1325,8 +1375,7 @@ impl RayCaster for DefaultRayCaster {
         //     let norm = obj.normal(point, face);
         //     let light_ray = s.lights.as_ref().unwrap().get_shadow_ray(point, &norm);
 
-        //     let mut path: Vec<BoundingBox> = Vec::new();
-        //     let mut objs = s.boxes.get_all_objects_for_ray(&light_ray, &mut path);
+        //     let mut objs = s.boxes.get_all_objects_for_ray(&light_ray);
         //     // objs.extend(s.otherobjs.iter().map(|o| (o.getid(), o)));
 
         //     let mut found = false;
@@ -1382,64 +1431,93 @@ impl RayCaster for DefaultRayCaster {
                    depth: usize, runstats: &mut HashMap<String, ProgressStat>,
                    allocator: &dyn Allocator) -> Color {
 
+        debug!("Ray: {:?}", r);
+
         if depth == 0 {
             return make_color((0, 0, 0));
         }
-
-        let t1 = get_thread_time();
-
         let blue = make_color((128, 180, 255));
 
-        let mut path: Vec<BoundingBox> = Vec::new();
-        let objs = s.boxes.get_all_objects_for_ray(&s.tris, r, &mut path);
+        let t1 = get_thread_time();
+        let hit = s.boxes.get_object_intersection_for_ray(&s.tris, &r);
 
         let t2 = get_thread_time();
 
-        let mut objcount = 0;
-
-        // let intersections_checks: Vec<Option<(f32, Vec3, CollisionFace, usize)>> = intersect_triangle_list(r, objs, &s.tris, allocator);
-
-        // let intersections: Vec<&(f32, Vec3, CollisionFace, usize)> = intersections_checks.iter().filter_map(
-        //             |x| {
-        //                 match x {
-        //                     Some(a) => Some(a),
-        //                     None => None
-        //                 }
-        //             }).collect();
-
-        let intersections: Vec<(f32, Point, CollisionFace, usize)> = objs.iter().filter_map(
-            |idx| {
-                if ignore_objid == idx as usize {
-                    None
-                } else {
-                    objcount += 1;
-                    match s.tris[idx as usize].intersects(&r) {
-                        Some(p) => Some((p.0, p.1, p.2, idx as usize)),
-                        None    => None
-                    }
-                }
-            }).collect();
-        
-        let t3 = get_thread_time();
-
         *runstats.entry("BoundingBox".to_string()).or_insert(ProgressStat::Time(time::Duration::from_nanos(0))).as_time_mut() += time::Duration::from_nanos((t2-t1) as u64);
-        *runstats.entry("Intersections".to_string()).or_insert(ProgressStat::Time(time::Duration::from_nanos(0))).as_time_mut() += time::Duration::from_nanos((t3-t2) as u64);
+        *runstats.entry("Intersections".to_string()).or_insert(ProgressStat::Time(time::Duration::from_nanos(0))).as_time_mut() += time::Duration::from_nanos((t2-t1) as u64);
 
         *runstats.entry("Rays".to_string()).or_insert(ProgressStat::Count(0)).as_count_mut() += 1;
-        *runstats.entry("TriangleChecks".to_string()).or_insert(ProgressStat::Count(0)).as_count_mut() += objcount;
+        // *runstats.entry("TriangleChecks".to_string()).or_insert(ProgressStat::Count(0)).as_count_mut() += objcount;
 
-        if intersections.len() == 0 {
-            blue
-        } else {
-            let (_dist, point, face, objidx) = intersections.iter().fold(&intersections[0],
-                |acc, x| {
-                    let (dist, _, _, _) = x;
-                    let (acc_dist, _, _, _) = acc;
-                    if dist < acc_dist { x } else { acc }
-                });
-                self.color_ray(r, s, *objidx, point, &face, depth, runstats, allocator)
+        debug!("{:?}", hit);
 
+        match hit {
+            None => blue,
+            Some((_t, point, face, objidx)) => {
+                self.color_ray(r, s, objidx, &point, &face, depth, runstats, allocator)
+            }
         }
+
+        // let t1 = get_thread_time();
+
+        // let objs = s.boxes.get_all_objects_for_ray(&s.tris, r);
+
+        // let t2 = get_thread_time();
+
+        // // let intersections_checks: Vec<Option<(f32, Vec3, CollisionFace, usize)>> = intersect_triangle_list(r, objs, &s.tris, allocator);
+
+        // // let intersections: Vec<&(f32, Vec3, CollisionFace, usize)> = intersections_checks.iter().filter_map(
+        // //             |x| {
+        // //                 match x {
+        // //                     Some(a) => Some(a),
+        // //                     None => None
+        // //                 }
+        // //             }).collect();
+
+        // let intersections: Vec<(f32, Point, CollisionFace, usize)> = objs.iter().fold(Vec::new(),
+        //     |acc, (t, idx_list)| {
+        //         if acc.len() > 0 {
+        //             acc
+        //         } else {
+
+        //             let mut tris = Vec::new();
+        //             for idx in idx_list {
+        //                 if ignore_objid == *idx {
+        //                     continue
+        //                 } else {
+        //                     match s.tris[*idx].intersects(&r) {
+        //                         Some(p) => {
+        //                             tris.push((p.0, p.1, p.2, *idx));
+        //                         },
+        //                         _ => {}
+        //                     }
+        //                 }
+        //             }
+
+        //             tris
+        //         }
+        //     });
+        
+        // let t3 = get_thread_time();
+
+        // *runstats.entry("BoundingBox".to_string()).or_insert(ProgressStat::Time(time::Duration::from_nanos(0))).as_time_mut() += time::Duration::from_nanos((t2-t1) as u64);
+        // *runstats.entry("Intersections".to_string()).or_insert(ProgressStat::Time(time::Duration::from_nanos(0))).as_time_mut() += time::Duration::from_nanos((t3-t2) as u64);
+
+        // *runstats.entry("Rays".to_string()).or_insert(ProgressStat::Count(0)).as_count_mut() += 1;
+        // *runstats.entry("TriangleChecks".to_string()).or_insert(ProgressStat::Count(0)).as_count_mut() += objcount;
+
+        // if intersections.len() == 0 {
+        //     blue
+        // } else {
+        //     let (_dist, point, face, objidx) = intersections.iter().fold(&intersections[0],
+        //         |acc, x| {
+        //             let (dist, _, _, _) = x;
+        //             let (acc_dist, _, _, _) = acc;
+        //             if dist < acc_dist { x } else { acc }
+        //         });
+        //         self.color_ray(r, s, *objidx, point, &face, depth, runstats, allocator)
+
+        // }
     }
 
 }
@@ -1516,7 +1594,7 @@ pub fn create_viewport(px: (u32, u32), size: (f32, f32), pos: &Point, dir: &Vec3
         vu: vu_r,
         vv: vv_r,
         maxdepth: maxdepth,
-        samples_per_pixel: samples
+        samples_per_pixel: samples,
     }
 }
 
@@ -1530,11 +1608,11 @@ impl Viewport {
         let vu_delta = self.vu.mult(1. / self.width as f32);
         let vv_delta = self.vv.mult(1. / self.height as f32);
 
-        // let u_off: f32 = 0.5;
-        // let v_off: f32 = 0.5;
-
-        let u_off = rand::random::<f32>();
-        let v_off = rand::random::<f32>();
+        let (u_off, v_off) = if self.samples_per_pixel > 1 {
+            (0.5, 0.5)
+        } else {
+            (rand::random::<f32>(), rand::random::<f32>())
+        };
 
         let vu_frac = vu_delta.mult(px_y + u_off);
         let vv_frac = vv_delta.mult(px_x + v_off);
@@ -1589,6 +1667,26 @@ impl Viewport {
             pixels_processed = 0;
             runstats.clear();
         }
+    }
+
+    pub fn walk_one_ray(&self, s: &Scene, data: & mut[Color], px: (usize, usize),
+                        caster: &dyn RayCaster) -> progress::ProgressCtx {
+
+        let mut progress_io = progress::create_ctx(1, self.width, self.height, false);
+
+        let bump = BumpAllocator::new((size_of::<Vec3>()*3 +
+                                       size_of::<[Vec3; 3]>() + 
+                                       size_of::<[f32; 3]>()*2 +
+                                       size_of::<f32>()*3) * s.tris.len() * self.maxdepth);
+        let mut runstats: HashMap<String, ProgressStat> = HashMap::new();
+
+        let ray_color = caster.project_ray(&self.pixel_ray((px.1,px.0)), s, usize::MAX, self.maxdepth, &mut runstats, &bump);
+
+        data[0] = ray_color;
+
+        progress_io.finish();
+
+        progress_io
     }
 
     pub fn walk_rays(&self, s: &Scene, data: & mut[Color], threads: usize,
