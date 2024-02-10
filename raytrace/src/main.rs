@@ -1,6 +1,7 @@
 
-use raytrace_lib::raytrace::{make_vec, make_color, make_disk, DefaultRayCaster,
-                            Scene, SurfaceKind, Triangle, Viewport};
+use raytrace_lib::raytrace::{make_vec, make_color, make_disk, RayCaster,
+                             DefaultRayCaster, Scene, SurfaceKind,
+                             Triangle, Viewport};
 use raytrace_lib::obj_parser;
 use raytrace_lib::raytrace;
 
@@ -72,7 +73,7 @@ fn run_iteration(tris: &Vec<Triangle>, v: &Viewport, initial: (usize, usize)) ->
 
     let mut data = vec![make_vec(&[0., 0., 0.]); (v.width*v.height) as usize ];
     let t1 = time::Instant::now();
-    v.walk_rays(&s, &mut data, 16, &caster, false);
+    caster.walk_rays(&v, &s, &mut data, 16, false);
     let t2 = time::Instant::now();
 
     t2-t1
@@ -175,7 +176,7 @@ fn main() -> Result<()> {
     // let _ = raytrace::write_png(file, (1, 1), &data);
 
     let mut data = vec![make_vec(&[0., 0., 0.]); (width*height) as usize ];
-    let progress_ctx = v.walk_rays(&s, &mut data, 1, &caster, true);
+    let progress_ctx = caster.walk_rays(&v, &s, &mut data, 1, true);
     progress_ctx.print_stats();
     let _ = raytrace::write_png(file, (width, height), &data);
 

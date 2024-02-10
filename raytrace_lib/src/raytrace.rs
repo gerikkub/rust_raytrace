@@ -87,9 +87,6 @@ impl Vec3 {
         Vec3 {
             v: self_1 * other_2 - self_2 * other_1
         }
-        // make_vec(&[self.v[1] * other.v[2] - self.v[2] * other.v[1],
-        //            self.v[2] * other.v[0] - self.v[0] * other.v[2],
-        //            self.v[0] * other.v[1] - self.v[1] * other.v[0]])
     }
 
     #[inline(always)]
@@ -121,9 +118,6 @@ impl Vec3 {
         make_vec(&[make_vec(&[b.0.v[0], b.0.v[1], b.0.v[2]]).dot(self),
                    make_vec(&[b.1.v[0], b.1.v[1], b.1.v[2]]).dot(self),
                    make_vec(&[b.2.v[0], b.2.v[1], b.2.v[2]]).dot(self)])
-        // Vec3(Vec3(b.0.0, b.0.1, b.0.2).dot(self),
-        //      Vec3(b.1.0, b.1.1, b.1.2).dot(self),
-        //      Vec3(b.2.0, b.2.1, b.2.2).dot(self))
     }
 }
 
@@ -528,7 +522,6 @@ pub fn make_disk(orig: &Point, norm: &Vec3, r: f32, d: f32, num_tris: usize,
     let norm_orth0 = norm.orthogonal().unit().mult(r);
     let norm_orth1 = norm.cross(&norm_orth0).unit().mult(r);
 
-    // let smudge = 2. * PI / 1000.;
     let smudge = 0.;
 
     for idx in 0..num_tris {
@@ -910,7 +903,6 @@ impl BoundingBox {
     #[inline(never)]
     fn get_object_intersection_for_ray(&self, tris: &Vec<Triangle>, r: &Ray) -> Option<(f32, Vec3, CollisionFace, usize)> {
 
-        // println!("BBx: {}", self.depth);
         debug!("{}Bounding box: {}", " ".repeat(self.depth), self.debug_str());
         match &self.objs {
             BBSubobj::Tris(_subts) => {
@@ -947,15 +939,6 @@ impl BoundingBox {
                         jdx -= 1;
                     }
                 }
-
-                // for idx in 0..8 {
-                //     print!("{:.02} ", if boxmap[idx].0.0 == f32::MAX {
-                //         -1.
-                //     } else {
-                //         boxmap[idx].0.0 
-                //     });
-                // }
-                // println!("");
 
                 boxmap.iter().fold(((0., 0.), None),
                     |((bboxtmin, bboxtmax), acc): ((f32, f32), Option<(f32, Vec3, CollisionFace, usize)>),
@@ -1103,37 +1086,6 @@ impl BoundingBox {
                  self.orig, self.len2
                  )
     }
-
-    // pub fn find_obj(&self, tris: &Vec<Triangle>, id: usize) -> Vec<&BoundingBox> {
-    //     let mut found_list: Vec<&BoundingBox> = Vec::new();
-    //     self.find_obj_helper(tris, id, &mut found_list);
-    //     found_list
-    // }
-
-    // pub fn find_obj_helper(&self, tris: &Vec<Triangle>, id: usize, found_list: &mut Vec<&BoundingBox>) {
-    //     if self.objs.len() > 0 {
-    //         for obj in &self.objs {
-    //             if tris[*obj].getid() == id {
-    //                 found_list.push(&self);
-    //             }
-    //         }
-    //     }
-
-    //     if self.child_boxes.len() > 0 {
-    //         for b in &self.child_boxes {
-    //             b.find_obj_helper(tris, id, found_list);
-    //         }
-    //     }
-    // }
-
-}
-
-pub trait RayCaster: Send + Sync {
-    fn project_ray(&self, r: &Ray, s: &Scene, depth: usize,
-                   runtimes: &mut HashMap<String, ProgressStat>) -> Color;
-    fn color_ray(&self, r: &Ray, s: &Scene, objidx: usize,
-                 point: &Point, face: &CollisionFace, depth: usize,
-                 runtimes: &mut HashMap<String, ProgressStat>) -> Color;
 }
 
 #[derive(Debug)]
@@ -1160,6 +1112,12 @@ pub fn get_thread_time() -> i64 {
     t.tv_sec * (1000*1000*1000) + t.tv_nsec
 }
 
+pub trait RayCaster: Send + Sync {
+    fn walk_rays(&self, v: &Viewport, s: &Scene,
+                 data: &mut[Color], threads: usize,
+                 show_progress: bool) -> progress::ProgressCtx;
+}
+
 #[derive(Copy,Clone)]
 pub struct DefaultRayCaster {
 }
@@ -1168,93 +1126,132 @@ unsafe impl Send for DefaultRayCaster {}
 unsafe impl Sync for DefaultRayCaster {}
 
 impl RayCaster for DefaultRayCaster {
-    fn color_ray(&self, r: &Ray, s: &Scene, objidx: usize,
-                 point: &Point, face: &CollisionFace, depth: usize,
-                 runtimes: &mut HashMap<String, ProgressStat>) -> Color {
+    fn walk_rays(&self, v: &Viewport, s: &Scene,
+                 data: & mut[Color], threads: usize,
+                 show_progress: bool) -> progress::ProgressCtx {
 
-        let shadowed = false;
-        // let shadowed = if s.lights.is_some() {
-        //     let norm = obj.normal(point, face);
-        //     let light_ray = s.lights.as_ref().unwrap().get_shadow_ray(point, &norm);
+        let (progress_tx, progress_rx) = channel();
 
-        //     let mut objs = s.boxes.get_all_objects_for_ray(&light_ray);
-        //     // objs.extend(s.otherobjs.iter().map(|o| (o.getid(), o)));
+        let mut progress_io = progress::create_ctx(threads, v.width, v.height, show_progress);
 
-        //     let mut found = false;
-        //     for (id, search_obj) in objs {
-        //         if id != obj.getid() {
-        //             if search_obj.intersects(&light_ray).is_some() {
-        //                 found = true;
-        //                 break;
-        //             }
-        //         }
-        //     }
+        thread::scope(|sc| {
 
-        //     found
-        // } else {
-        //     false
-        // };
+            let data_parts: Arc<Mutex<VecDeque<(&mut [Color], usize)>>> = 
+                Arc::new(Mutex::new(VecDeque::from(
+                    data.chunks_mut(v.width).zip(0..v.height).collect::<VecDeque<(&mut [Color], usize)>>())));
 
-        let black = make_color((0,0,0));
-
-        match s.tris[objidx].getsurface(face) {
-            SurfaceKind::Solid {color} => {
-                if !shadowed {color} else {black}
-            },
-            SurfaceKind::Matte {color, alpha} => {
-                mix_color(if !shadowed {&color} else {&black},
-                        &self.project_ray(&lambertian_ray(point,
-                                                    &s.tris[objidx].normal(point, face)),
-                                    s,
-                                    depth - 1,
-                                    runtimes),
-                        alpha)
-                
-            },
-            SurfaceKind::Reflective {scattering, color, alpha}  => {
-                mix_color(if !shadowed {&color} else {&black},
-                        &self.project_ray(&reflect_ray(point,
-                                                    &s.tris[objidx].normal(point, face),
-                                                    &r.dir,
-                                                    scattering),
-                                    s,
-                                    depth - 1,
-                                    runtimes),
-                        alpha)
+            for t in 0..threads {
+                let t_progress_tx = progress_tx.clone();
+                let t_parts = Arc::clone(&data_parts);
+                sc.spawn(move || {
+                    v.walk_ray_set(s, t_parts, t, t_progress_tx);
+                });
             }
+
+            drop(progress_tx);
+            'waitloop: loop {
+                match progress_rx.recv() {
+                    Ok((t_num, row, y, runstats)) => {
+                        progress_io.update(t_num, row, y, &runstats);
+                    }
+                    Err(_x) => {
+                        break 'waitloop;
+                    }
+                };
+            }
+        });
+
+        progress_io.finish();
+
+        progress_io
+    }
+}
+
+fn color_ray(r: &Ray, s: &Scene, objidx: usize,
+             point: &Point, face: &CollisionFace, depth: usize,
+             runtimes: &mut HashMap<String, ProgressStat>) -> Color {
+
+    let shadowed = false;
+    // let shadowed = if s.lights.is_some() {
+    //     let norm = obj.normal(point, face);
+    //     let light_ray = s.lights.as_ref().unwrap().get_shadow_ray(point, &norm);
+
+    //     let mut objs = s.boxes.get_all_objects_for_ray(&light_ray);
+    //     // objs.extend(s.otherobjs.iter().map(|o| (o.getid(), o)));
+
+    //     let mut found = false;
+    //     for (id, search_obj) in objs {
+    //         if id != obj.getid() {
+    //             if search_obj.intersects(&light_ray).is_some() {
+    //                 found = true;
+    //                 break;
+    //             }
+    //         }
+    //     }
+
+    //     found
+    // } else {
+    //     false
+    // };
+
+    let black = make_color((0,0,0));
+
+    match s.tris[objidx].getsurface(face) {
+        SurfaceKind::Solid {color} => {
+            if !shadowed {color} else {black}
+        },
+        SurfaceKind::Matte {color, alpha} => {
+            mix_color(if !shadowed {&color} else {&black},
+                    &project_ray(&lambertian_ray(point,
+                                                 &s.tris[objidx].normal(point, face)),
+                                s,
+                                depth - 1,
+                                runtimes),
+                    alpha)
+            
+        },
+        SurfaceKind::Reflective {scattering, color, alpha}  => {
+            mix_color(if !shadowed {&color} else {&black},
+                    &project_ray(&reflect_ray(point,
+                                              &s.tris[objidx].normal(point, face),
+                                              &r.dir,
+                                              scattering),
+                                s,
+                                depth - 1,
+                                runtimes),
+                    alpha)
         }
     }
+}
 
-    fn project_ray(&self, r: &Ray, s: &Scene, depth: usize, 
-                   runstats: &mut HashMap<String, ProgressStat>) -> Color {
+fn project_ray(r: &Ray, s: &Scene, depth: usize, 
+               runstats: &mut HashMap<String, ProgressStat>) -> Color {
 
-        debug!("Ray: {:?}", r);
+    debug!("Ray: {:?}", r);
 
-        if depth == 0 {
-            return make_color((0, 0, 0));
+    if depth == 0 {
+        return make_color((0, 0, 0));
+    }
+    let blue = make_color((128, 180, 255));
+
+    let t1 = get_thread_time();
+    let hit = s.boxes.get_object_intersection_for_ray(&s.tris, &r);
+
+    let t2 = get_thread_time();
+
+    *runstats.entry("BoundingBox".to_string()).or_insert(ProgressStat::Time(time::Duration::from_nanos(0))).as_time_mut() += time::Duration::from_nanos((t2-t1) as u64);
+    *runstats.entry("Intersections".to_string()).or_insert(ProgressStat::Time(time::Duration::from_nanos(0))).as_time_mut() += time::Duration::from_nanos((t2-t1) as u64);
+
+    *runstats.entry("Rays".to_string()).or_insert(ProgressStat::Count(0)).as_count_mut() += 1;
+    // *runstats.entry("TriangleChecks".to_string()).or_insert(ProgressStat::Count(0)).as_count_mut() += objcount;
+
+    debug!("{:?}", hit);
+
+    match hit {
+        None => blue,
+        Some((_t, point, face, objidx)) => {
+            color_ray(r, s, objidx, &point, &face, depth, runstats)
         }
-        let blue = make_color((128, 180, 255));
-
-        let t1 = get_thread_time();
-        let hit = s.boxes.get_object_intersection_for_ray(&s.tris, &r);
-
-        let t2 = get_thread_time();
-
-        *runstats.entry("BoundingBox".to_string()).or_insert(ProgressStat::Time(time::Duration::from_nanos(0))).as_time_mut() += time::Duration::from_nanos((t2-t1) as u64);
-        *runstats.entry("Intersections".to_string()).or_insert(ProgressStat::Time(time::Duration::from_nanos(0))).as_time_mut() += time::Duration::from_nanos((t2-t1) as u64);
-
-        *runstats.entry("Rays".to_string()).or_insert(ProgressStat::Count(0)).as_count_mut() += 1;
-        // *runstats.entry("TriangleChecks".to_string()).or_insert(ProgressStat::Count(0)).as_count_mut() += objcount;
-
-        debug!("{:?}", hit);
-
-        match hit {
-            None => blue,
-            Some((_t, point, face, objidx)) => {
-                self.color_ray(r, s, objidx, &point, &face, depth, runstats)
-            }
-        }
-
     }
 
 }
@@ -1263,7 +1260,6 @@ impl RayCaster for DefaultRayCaster {
 pub struct Scene {
     pub tris: Vec<Triangle>,
     pub boxes: BoundingBox,
-    // pub otherobjs: Vec<CollisionObject>,
     // pub lights: Option<LightSource>
 }
 
@@ -1360,8 +1356,7 @@ impl Viewport {
     }
 
     fn walk_ray_set(&self, s: &Scene, rows: Arc<Mutex<VecDeque<(&mut [Color], usize)>>>,
-                    t_num: usize, progress_tx: Sender<(usize, usize, usize, HashMap<String, ProgressStat>)>,
-                    caster: &dyn RayCaster) {
+                    t_num: usize, progress_tx: Sender<(usize, usize, usize, HashMap<String, ProgressStat>)>) {
 
         let mut rays_count = 0;
         let mut pixels_processed = 0;
@@ -1380,7 +1375,7 @@ impl Viewport {
             for y in 0..self.width {
                 let mut acc = make_vec(&[0., 0., 0.]);
                 for _i in 0..self.samples_per_pixel {
-                    let ray_color = caster.project_ray(&self.pixel_ray((row,y)), s, self.maxdepth, &mut runstats);
+                    let ray_color = project_ray(&self.pixel_ray((row,y)), s, self.maxdepth, &mut runstats);
                     acc = acc.add(&ray_color);
 
                     rays_count += 1;
@@ -1401,14 +1396,13 @@ impl Viewport {
         }
     }
 
-    pub fn walk_one_ray(&self, s: &Scene, data: & mut[Color], px: (usize, usize),
-                        caster: &dyn RayCaster) -> progress::ProgressCtx {
+    pub fn walk_one_ray(&self, s: &Scene, data: & mut[Color], px: (usize, usize)) -> progress::ProgressCtx {
 
         let mut progress_io = progress::create_ctx(1, self.width, self.height, false);
 
         let mut runstats: HashMap<String, ProgressStat> = HashMap::new();
 
-        let ray_color = caster.project_ray(&self.pixel_ray((px.1,px.0)), s, self.maxdepth, &mut runstats);
+        let ray_color = project_ray(&self.pixel_ray((px.1,px.0)), s, self.maxdepth, &mut runstats);
 
         data[0] = ray_color;
 
@@ -1417,45 +1411,6 @@ impl Viewport {
         progress_io
     }
 
-    pub fn walk_rays(&self, s: &Scene, data: & mut[Color], threads: usize,
-                     caster: &dyn RayCaster, show_progress: bool) -> progress::ProgressCtx {
-
-        let (progress_tx, progress_rx) = channel();
-
-        let mut progress_io = progress::create_ctx(threads, self.width, self.height, show_progress);
-
-
-        thread::scope(|sc| {
-
-            let data_parts: Arc<Mutex<VecDeque<(&mut [Color], usize)>>> = 
-                Arc::new(Mutex::new(VecDeque::from(
-                    data.chunks_mut(self.width).zip(0..self.height).collect::<VecDeque<(&mut [Color], usize)>>())));
-
-            for t in 0..threads {
-                let t_progress_tx = progress_tx.clone();
-                let t_parts = Arc::clone(&data_parts);
-                sc.spawn(move || {
-                    self.walk_ray_set(s, t_parts, t, t_progress_tx, caster);
-                });
-            }
-
-            drop(progress_tx);
-            'waitloop: loop {
-                match progress_rx.recv() {
-                    Ok((t_num, row, y, runstats)) => {
-                        progress_io.update(t_num, row, y, &runstats);
-                    }
-                    Err(_x) => {
-                        break 'waitloop;
-                    }
-                };
-            }
-        });
-
-        progress_io.finish();
-
-        progress_io
-    }
 }
 
 
