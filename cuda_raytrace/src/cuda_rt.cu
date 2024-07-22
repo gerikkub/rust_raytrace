@@ -2,341 +2,426 @@
 #include "rust/cxx.h"
 #include "cuda_raytrace/src/main.rs.h"
 
-#include <cfloat>
-#include <iostream>
-#include <unistd.h>
+#include <limits>
 
 #include <cuda_runtime.h>
 
-__device__ float vec_dot(float a[3], float b[3]) {
-    return a[0] * b[0] +
-           a[1] * b[1] +
-           a[2] * b[2];
+// Memory Layout
+
+// Triangle
+// - Incenter (Vec3)
+// - Normal (Vec3)
+// - Sides (Vec3)
+// - Number (U32)
+
+// Possible kernels
+// - Take one ray and N triangles. Find the closest hit
+// - Take one triangle and N rays. Record the hit times for all triangles
+//   - Then look for the best hit for a given ray. CAS at a global memory location?
+// - Take N rays and M triangles. Perform hit detection for N rays at once
+//   - Each thread block corresponds to 1 ray and up to 1024 triangles
+//   - How to access triangles effectively
+//     - Effectively a random access lookup. Might be okay?
+//   - Rays stay in global memory
+//   - Each kernel invocation calculates one level set of rays cast
+//     - Invoke multiple times to for reflections
+//   - At the end of all invocations, rays are an array of triangle hits
+//     - Colors still need to be mixed
+
+enum {
+    INCENTER_0_OFF = 0,
+    INCENTER_1_OFF = 1,
+    INCENTER_2_OFF = 2,
+
+    NORM_0_OFF = 3,
+    NORM_1_OFF = 4,
+    NORM_2_OFF = 5,
+
+    SIDE_0_0_OFF = 6,
+    SIDE_0_1_OFF = 7,
+    SIDE_0_2_OFF = 8,
+
+    SIDE_1_0_OFF = 9,
+    SIDE_1_1_OFF = 10,
+    SIDE_1_2_OFF = 11,
+
+    SIDE_2_0_OFF = 12,
+    SIDE_2_1_OFF = 13,
+    SIDE_2_2_OFF = 14,
+
+    NUM_OFF = 15,
+
+    TRILIST_MAX = 16,
+};
+
+enum {
+    RAY_P_0_OFF = 0,
+    RAY_P_1_OFF = 1,
+    RAY_P_2_OFF = 2,
+
+    RAY_V_0_OFF = 3,
+    RAY_V_1_OFF = 4,
+    RAY_V_2_OFF = 5,
+
+    RAYLIST_MAX = 6,
+};
+
+enum {
+    TRI_T_OFF = 0,
+    TRI_NUM_OFF = 1
+};
+
+__device__ float fetch_thread_value_f32(float* base, unsigned int off) {
+    return base[off*blockDim.x + threadIdx.x];
 }
 
-__device__ void vec_add(float a[3], float b[3], float out[3]) {
-    out[0] = a[0] + b[0];
-    out[1] = a[1] + b[1];
-    out[2] = a[2] + b[2];
+__device__ uint32_t fetch_thread_value_u32(float* base, unsigned int off) {
+    uint32_t* u32_base = reinterpret_cast<uint32_t*>(base);
+    return u32_base[off*blockDim.x + threadIdx.x];
 }
 
-__device__ void vec_sub(float a[3], float b[3], float out[3]) {
-    out[0] = a[0] - b[0];
-    out[1] = a[1] - b[1];
-    out[2] = a[2] - b[2];
+__device__ void write_thread_value_f32(float* base, unsigned int off, float val) {
+    base[off*blockDim.x + threadIdx.x] = val;
 }
 
-__device__ void vec_mult(float a[3], const float b, float out[3]) {
-    out[0] = a[0] * b;
-    out[1] = a[1] * b;
-    out[2] = a[2] * b;
+__device__ void write_thread_value_u32(float* base, unsigned int off, uint32_t val) {
+    uint32_t* u32_base = reinterpret_cast<uint32_t*>(base);
+    u32_base[off*blockDim.x + threadIdx.x] = val;
+}
+
+__device__ float3 fetch_thread_vec_f32(float* base, unsigned int off) {
+    float3 v;
+    v.x = fetch_thread_value_f32(base, off);
+    v.y = fetch_thread_value_f32(base, off + 1);
+    v.z = fetch_thread_value_f32(base, off + 2);
+    return v;
+}
+
+__device__ float fetch_ray_value_f32(float* base, unsigned int off) {
+    return base[off*gridDim.x + blockIdx.x];
+}
+
+__device__ float3 fetch_ray_vec_f32(float* base, unsigned int off) {
+    float3 v;
+    v.x = fetch_ray_value_f32(base, off);
+    v.y = fetch_ray_value_f32(base, off + 1);
+    v.z = fetch_ray_value_f32(base, off + 2);
+    return v;
 }
 
 
-__global__ void cuda_triangle_intersect(int* triidxs, float* r, float* incenters, float* norms, float* sides, float* dists, float* ts, bool* hit_edges) {
+__device__ float vec_dot(const float3 a, const float3 b) {
+    float t = a.x * b.x;
+    t = fmaf(a.y, b.y, t);
+    return fmaf(a.z, b.z, t);
+}
+
+__device__ float3 vec_add(const float3 a, const float3 b) {
+    float3 o;
+    o.x = a.x + b.x;
+    o.y = a.y + b.y;
+    o.z = a.z + b.z;
+    return o;
+}
+
+__device__ float3 vec_sub(const float3 a, const float3 b) {
+    float3 o;
+    o.x = a.x - b.x;
+    o.y = a.y - b.y;
+    o.z = a.z - b.z;
+    return o;
+}
+
+__device__ float3 vec_scale(const float3 a, const float b) {
+    float3 o;
+    o.x = a.x * b;
+    o.y = a.y * b;
+    o.z = a.z * b;
+    return o;
+}
 
 
-    // CudaTriangle* tri = &tris[blockDim.x];
-    unsigned int _idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int idx = triidxs[_idx];
-    int idx3 = triidxs[_idx] * 3;
-    int idx9 = triidxs[_idx] * 9;
+__global__ void cuda_triangle_intersect(float* rays,
+                                        float* tripointer_full,
+                                        uint32_t* ray_hitnums) {
 
-    float incenter[3] = {incenters[idx3], incenters[idx3+1], incenters[idx3+2]};
-    float ra[3] = {r[0], r[1], r[2]};
-    float ru[3] = {r[3], r[4], r[5]};
-    float norm[3] = {norms[idx3], norms[idx3+1], norms[idx3+2]};
-    float side[3][3] = {{sides[idx9 + 0], sides[idx9 + 1], sides[idx9 + 2]},
-                        {sides[idx9 + 3], sides[idx9 + 4], sides[idx9 + 5]},
-                        {sides[idx9 + 6], sides[idx9 + 7], sides[idx9 + 8]}};
-    float dist[3] = {dists[idx3], dists[idx3+1], dists[idx3+2]};
+    extern __shared__ float thread_temp[];
+    float* hit_times = thread_temp;
+    uint32_t* hit_nums = reinterpret_cast<uint32_t*>(thread_temp + blockDim.x);
 
-    float a[3];
-    vec_sub(incenter, ra, a);
-    float t = vec_dot(norm, a) / vec_dot(norm, ru);
-    float b[3];
-    float p[3];
-    vec_mult(ru, t, b);
-    vec_add(ra, b, p);
-    float ip[3];
-    vec_sub(p, incenter, ip);
+    float* tris = &tripointer_full[blockIdx.x * TRILIST_MAX * blockDim.x];
 
-    // float t = vec_dot(tri->norm, vec_sub(tri->incenter, r.a)) / vec_dot(tri->norm, r.u);
-    // CudaVec3 p = vec_add(r.a, vec_mult(r.u, t));
-    // CudaVec3 ip = vec_sub(p, tri->incenter);
+    bool hit = false;
+    float t = 0;
+    uint32_t tri_num = fetch_thread_value_u32(tris, NUM_OFF);
 
-    bool hit_edge = false;
+    hit_nums[threadIdx.x] = tri_num;
 
-    bool outside = false;
-    for (int jdx = 0; jdx < 3; jdx++) {
-        // float dist = vec_dot(ip, tri->sides[idx]);
-        float jdist = vec_dot(ip, side[jdx]);
-        if (jdist > dist[jdx]) {
-            outside = true;
-        } else if (jdist > dist[jdx] * 0.95) {
-            hit_edge = true;
-        }
+    // if (threadIdx.x < 4) {
+    //     printf("tri_num: %d %d %d\n", blockIdx.x, threadIdx.x, tri_num);
+    // }
+
+    if (tri_num != 0) {
+        // Offset ray intersection by triangle center
+        float3 incenter = fetch_thread_vec_f32(tris, INCENTER_0_OFF);
+        // if (tri_num == 858) {
+        //     printf("Incenter %f %f %f\n",
+        //            incenter.x, incenter.y, incenter.z);
+        // }
+
+        float3 ray_p = fetch_ray_vec_f32(rays, RAY_P_0_OFF);
+        // if (tri_num == 858) {
+        //     printf("Ray P %f %f %f\n",
+        //            ray_p.x, ray_p.y, ray_p.z);
+        // }
+
+        float3 a = vec_sub(incenter, ray_p);
+
+        // Calculate ray hit time with plane
+        float3 norm = fetch_thread_vec_f32(tris, NORM_0_OFF);
+        // if (tri_num == 858) {
+        //     printf("norm %f %f %f\n",
+        //            norm.x, norm.y, norm.z);
+        // }
+        float t0 = vec_dot(norm, a);
+        float3 ray_v = fetch_ray_vec_f32(rays, RAY_V_0_OFF);
+        // if (tri_num == 858) {
+        //     printf("Ray V %f %f %f\n",
+        //            ray_v.x, ray_v.y, ray_v.z);
+        // }
+        float t1 = vec_dot(norm, ray_v);
+        t = fdividef(t0, t1);
+
+        // Calculate hit point in plane
+        float3 b = vec_scale(ray_v, t);
+        float3 p = vec_add(ray_p, b);
+        float3 ip = vec_sub(p, incenter);
+
+        // Calculate hit vectors for all three triangle sides
+        float3 side_0 = fetch_thread_vec_f32(tris, SIDE_0_0_OFF);
+        float side_0_len = norm3df(side_0.x, side_0.y, side_0.z);
+        float3 side_0_norm = vec_scale(side_0, __frcp_rn(side_0_len));
+        float d_0 = vec_dot(ip, side_0_norm);
+        hit = d_0 < side_0_len;
+        // if (blockIdx.x == 0 && threadIdx.x == 1) {
+        // }
+        // TODO: Could early exit if all threads fail hit detection
+
+        float3 side_1 = fetch_thread_vec_f32(tris, SIDE_1_0_OFF);
+        float side_1_len = norm3df(side_1.x, side_1.y, side_1.z);
+        float3 side_1_norm = vec_scale(side_1, __frcp_rn(side_1_len));
+        float d_1 = vec_dot(ip, side_1_norm);
+        hit = hit && (d_1 < side_1_len);
+        // if (blockIdx.x == 0 && threadIdx.x == 1) {
+        // }
+        // TODO: Could early exit if all threads fail hit detection
+
+        float3 side_2 = fetch_thread_vec_f32(tris, SIDE_2_0_OFF);
+        float side_2_len = norm3df(side_2.x, side_2.y, side_2.z);
+        float3 side_2_norm = vec_scale(side_2, __frcp_rn(side_2_len));
+        float d_2 = vec_dot(ip, side_2_norm);
+        hit = hit && (d_2 < side_2_len);
+        // if (blockIdx.x == 0 && threadIdx.x == 1) {
+        // }
+
+        // if (hit && t > 0.) {
+        //     printf("CT hit %d %d %d %f\n", blockIdx.x, threadIdx.x, tri_num, t);
+        //     printf("Ray: (%f %f %f) (%f %f %f)\n",
+        //            ray_p.x, ray_p.y, ray_p.z, 
+        //            ray_v.x, ray_v.y, ray_v.z);
+        //     printf("Tri: (%f %f %f) (%f %f %f)\n",
+        //            incenter.x, incenter.y, incenter.z, 
+        //            norm.x, norm.y, norm.z);
+        //     printf("Side 0 (%f %f %f)\n",
+        //            side_0.x, side_0.y, side_0.z);
+        //     printf(" len: %f\n", side_0_len);
+        //     printf(" d: %f\n", d_0);
+        //     printf("Side 1 (%f %f %f)\n",
+        //            side_1.x, side_1.y, side_1.z);
+        //     printf(" len: %f\n", side_1_len);
+        //     printf(" d: %f\n", d_1);
+        //     printf("Side 2 (%f %f %f)\n",
+        //            side_2.x, side_2.y, side_2.z);
+        //     printf(" len: %f\n", side_2_len);
+        //     printf(" d: %f\n", d_2);
+        // }
     }
 
-    ts[_idx] = outside ? -1 : t;
-    hit_edges[_idx] = hit_edge;
-}
 
-#define cudaAssert(err) \
-do { \
-    if (err != cudaSuccess) { \
-        std::cout << "Cuda Error: " << cudaGetErrorString(err) << ": " << __LINE__ << std::endl; \
-        assert(err == cudaSuccess); \
-    } \
-} while(0)
-//#define cudaAssert(err) assert((void(cudaGetErrorString(err)), err == cudaSuccess))
-
-uint64_t gettime_nanos(int clock) {
-    struct timespec t;
-    int stat = clock_gettime(clock, &t);
-    assert(stat == 0);
-    return t.tv_sec * (1000*1000*1000) + t.tv_nsec;
-}
-
-unsigned int iDivUp(unsigned int a, unsigned int b) { return (a % b != 0) ? (a / b + 1) : (a / b); }
-
-static float* h_incenters = nullptr;
-static float* h_norms = nullptr;
-static float* h_sides = nullptr;
-static float* h_dists = nullptr;
-
-static float* d_incenters = nullptr;
-static float* d_norms = nullptr;
-static float* d_sides = nullptr;
-static float* d_dists = nullptr;
-
-void preload_triangles_cuda(rust::Vec<::CudaTriangle> const& tris) {
-
-    cudaError_t err;
-
-    h_incenters = new float[tris.size()*3];
-    h_norms = new float[tris.size()*3];
-    h_sides = new float[tris.size()*3*3];
-    h_dists = new float[tris.size()*3];
-    for (int idx = 0; idx < tris.size(); idx++) {
-        h_incenters[3*idx] = tris[idx].incenter.v[0];
-        h_incenters[3*idx+1] = tris[idx].incenter.v[1];
-        h_incenters[3*idx+2] = tris[idx].incenter.v[2];
-
-        h_norms[3*idx] = tris[idx].norm.v[0];
-        h_norms[3*idx+1] = tris[idx].norm.v[1];
-        h_norms[3*idx+2] = tris[idx].norm.v[2];
-
-        h_sides[9*idx] = tris[idx].sides[0].v[0];
-        h_sides[9*idx+1] = tris[idx].sides[0].v[1];
-        h_sides[9*idx+2] = tris[idx].sides[0].v[2];
-        h_sides[9*idx+3] = tris[idx].sides[1].v[0];
-        h_sides[9*idx+4] = tris[idx].sides[1].v[1];
-        h_sides[9*idx+5] = tris[idx].sides[1].v[2];
-        h_sides[9*idx+6] = tris[idx].sides[2].v[0];
-        h_sides[9*idx+7] = tris[idx].sides[2].v[1];
-        h_sides[9*idx+8] = tris[idx].sides[2].v[2];
-
-        h_dists[3*idx] = tris[idx].side_lens[0];
-        h_dists[3*idx+1] = tris[idx].side_lens[1];
-        h_dists[3*idx+2] = tris[idx].side_lens[2];
-    }
-    d_incenters = nullptr;
-    err = cudaMalloc((void**)&d_incenters, tris.size()*3*sizeof(float));
-    cudaAssert(err);
-    err = cudaMemcpy(d_incenters, h_incenters, tris.size()*3*sizeof(float), cudaMemcpyHostToDevice);
-    cudaAssert(err);
-
-    d_norms = nullptr;
-    err = cudaMalloc((void**)&d_norms, tris.size()*3*sizeof(float));
-    cudaAssert(err);
-    err = cudaMemcpy(d_norms, h_norms, tris.size()*3*sizeof(float), cudaMemcpyHostToDevice);
-    cudaAssert(err);
-
-    d_sides = nullptr;
-    err = cudaMalloc((void**)&d_sides, tris.size()*9*sizeof(float));
-    cudaAssert(err);
-    err = cudaMemcpy(d_sides, h_sides, tris.size()*9*sizeof(float), cudaMemcpyHostToDevice);
-    cudaAssert(err);
-
-    d_dists = nullptr;
-    err = cudaMalloc((void**)&d_dists, tris.size()*3*sizeof(float));
-    cudaAssert(err);
-    err = cudaMemcpy(d_dists, h_dists, tris.size()*3*sizeof(float), cudaMemcpyHostToDevice);
-    cudaAssert(err);
-}
-
-CudaColor project_ray_cuda(CudaRay const & r,
-                           rust::Vec<std::size_t> const & tris,
-                           std::size_t ignore_objid,
-                           std::size_t depth,
-                           std::array<std::uint64_t, 3> &runtimes) {
-    
-
-    (void)depth;
-    (void)ignore_objid;
-    cudaError_t err;
-
-    CudaColor background = { 128, 200, 255 };
-
-    if (tris.size() == 0) {
-        return background;
+    // Filter out negative times and misses
+    if (!hit || t < 0.) {
+        t = FLT_MAX;
     }
 
-    unsigned int numThreads = min((unsigned int)tris.size(), 256);
-    unsigned int numBlocks = iDivUp(tris.size(), numThreads);
-    unsigned int ecount = numThreads*numBlocks;
-
-    // std::size_t max = 0;
-    // for (auto i : tris) {
-    //     if (i > max) {
-    //         max = i;
+    // if (threadIdx.x < 4) {
+    //     if (hit) {
+    //         printf("CUDA Thread %d %d %d Hit\n",
+    //                blockIdx.x, threadIdx.x, tri_num);
+    //     } else {
+    //         printf("CUDA Thread %d %d %d Miss\n",
+    //                blockIdx.x, threadIdx.x, tri_num);
     //     }
     // }
-    // std::cout << "Max: " << max << " Count: " << tris.size() << std::endl;
 
-    uint64_t t1 = gettime_nanos(CLOCK_THREAD_CPUTIME_ID);
+    // Place hit times in shared memory
+    hit_times[threadIdx.x] = t;
+    __syncthreads();
 
-    int* d_triidxs = nullptr;
-    err = cudaMalloc((void**)& d_triidxs, tris.size()*sizeof(int));
-    cudaAssert(err);
-    err = cudaMemcpy(d_triidxs, tris.data(), tris.size()*sizeof(int), cudaMemcpyHostToDevice);
-
-    float h_r[6] = {r.a.v[0], r.a.v[1], r.a.v[2],
-                    r.u.v[0], r.u.v[1], r.u.v[2]};
-    float* d_r = nullptr;
-    err = cudaMalloc((void**)& d_r, 6*sizeof(float));
-    cudaAssert(err);
-    err = cudaMemcpy(d_r, h_r, 6*sizeof(float), cudaMemcpyHostToDevice);
-    cudaAssert(err);
-
-    float* cuda_ts = nullptr;
-    err = cudaMalloc((void**)&cuda_ts, ecount*sizeof(float));
-    cudaAssert(err);
-
-    bool* cuda_hit_edges = nullptr;
-    err = cudaMalloc((void**)&cuda_hit_edges, ecount*sizeof(bool));
-    cudaAssert(err);
-
-
-    uint64_t t2 = gettime_nanos(CLOCK_THREAD_CPUTIME_ID);
-    uint64_t t1_mono = gettime_nanos(CLOCK_MONOTONIC);
-
-// __global__ void cuda_triangle_intersect(float* r, float* incenters, float* norms, float* sides, float* dists, float* ts, bool* hit_edges) {
-    cuda_triangle_intersect<<<numBlocks, numThreads>>>(d_triidxs, d_r, d_incenters, d_norms, d_sides, d_dists, cuda_ts, cuda_hit_edges);
-    err = cudaGetLastError();
-    cudaAssert(err);
-
-    uint64_t t2_mono = gettime_nanos(CLOCK_MONOTONIC);
-    uint64_t t3 = gettime_nanos(CLOCK_THREAD_CPUTIME_ID);
-
-
-    float* ts = new float[ecount];
-    bool* hit_edges = new bool[ecount];
-
-    err = cudaMemcpy(ts, cuda_ts, (ecount)*sizeof(float), cudaMemcpyDeviceToHost);
-    cudaAssert(err);
-    err = cudaFree(cuda_ts);
-    cudaAssert(err);
-
-    err = cudaMemcpy(hit_edges, cuda_hit_edges, (ecount)*sizeof(bool), cudaMemcpyDeviceToHost);
-    cudaAssert(err);
-    err = cudaFree(cuda_hit_edges);
-    cudaAssert(err);
-
-    int min_idx = -1;
-    float min_ts = FLT_MAX;
-    for (std::size_t idx = 0; idx < tris.size(); idx++) {
-        if (ts[idx] > 0. && ts[idx] < min_ts) {
-            min_ts = ts[idx];
-            min_idx = idx;
+    // Find minimum hit time in the thread block
+    // Requires log2(1024) == 10 steps
+    for (int i = 1; i <= 10; i++) {
+        if (threadIdx.x >= (1024 >> i)) {
+            return;
         }
-    }
 
-    uint64_t t4 = gettime_nanos(CLOCK_THREAD_CPUTIME_ID);
+        uint32_t cmp_offset = 1024 >> i;
+        float t1 = hit_times[threadIdx.x];
+        float t2 = hit_times[threadIdx.x + cmp_offset];
 
-    runtimes[0] = t2-t1;
-    runtimes[1] = t2_mono-t1_mono;
-    runtimes[2] = t4-t3;
+        uint32_t t1_num = hit_nums[threadIdx.x];
+        uint32_t t2_num = hit_nums[threadIdx.x + cmp_offset];
 
-    CudaColor ret;
+        // if (threadIdx.x == (864 - 512)) {
+        //     printf("Compare %d %f to %d %f\n",
+        //            t1_num, t1,
+        //            t2_num, t2);
+        // }
 
-    if (min_idx >= 0) {
-        if (hit_edges[min_idx]) {
-            ret = CudaColor {
-                0, 0, 0
-            };
+        // if (t1_num == 858 || t2_num == 858) {
+        //     printf("Compare %d %f to %d %f\n",
+        //            t1_num, t1,
+        //            t2_num, t2);
+        // }
+
+        float tmin = fminf(t1, t2);
+        uint32_t tmin_num;
+        if (tmin == t1) {
+            tmin_num = t1_num;
         } else {
-            ret = CudaColor {
-                255, 0, 0
-            };
+            tmin_num = t2_num;
         }
-    } else {
-        ret = background;
+
+        hit_times[threadIdx.x] = tmin;
+        hit_nums[threadIdx.x] = tmin_num;
+
+        __syncthreads();
     }
 
-    delete[] ts;
-    delete[] hit_edges;
-
-    return ret;
+    // Write the minimum hit time to ray_results
+    if (threadIdx.x == 0) {
+        // printf("CUDA Hit %d %f\n", hit_nums[0], hit_times[0]);
+        if (hit_times[0] == FLT_MAX) {
+            // printf("CUDA Miss %d\n", blockIdx.x);
+            ray_hitnums[blockIdx.x] = 0;
+        } else {
+            // printf("CUDA Hit %d %d %f\n", blockIdx.x, hit_nums[0], hit_times[0]);
+            ray_hitnums[blockIdx.x] = hit_nums[0];
+        }
+    }
 }
 
-// CudaColor project_ray_cpp(CudaRay const & r,
-//                           rust::Vec<::CudaTriangle> const & tris,
-//                           std::size_t ignore_objid,
-//                           std::size_t depth) {
-//     (void)depth;
-    
-//     float min_t = FLT_MAX;
-//     CudaTriangle* min_tri = nullptr;
-//     bool min_hit_edge = false;
-//     for (auto tri : tris) {
-//         if (tri.id == ignore_objid) {
-//             continue;
-//         }
+void exec_cuda_raytrace(rust::Vec<CudaTriangle> const & alltris,
+                        rust::Vec<CudaRay> const & rays,
+                        rust::Vec<uint32_t> const & tris,
+                        const uint32_t trilist_stride,
+                        const uint32_t stream_num,
+                        rust::Slice<std::uint32_t> hit_nums_out,
+                        std::array<std::uint64_t, 4> &runtimes_out) {
 
-//         float t = vec_dot(tri.norm, vec_sub(tri.incenter, r.a)) / vec_dot(tri.norm, r.u);
-//         if (t < 0 || t > min_t) {
-//             continue;
-//         }
-//         CudaVec3 p = vec_add(r.a, vec_mult(r.u, t));
-//         CudaVec3 ip = vec_sub(p, tri.incenter);
+    // printf("CUDA Exec\n");
+    // printf(" Rays: %d\n", rays.size());
+    // printf(" Triangles: %d\n", tris.size());
+    // printf(" Triangle Stride: %d\n", trilist_stride);
+    // printf("\n");
 
-//         bool hit_edge = false;
+    // Build memory layout for cuda execution
+    float* raylist = new float[RAYLIST_MAX * rays.size()];
+    float* trilist = new float[TRILIST_MAX * trilist_stride * rays.size()];
 
-//         bool outside = false;
-//         for (int idx = 0; idx < 3; idx++) {
-//             float dist = vec_dot(ip, tri.sides[idx]);
-//             if (dist > tri.side_lens[idx]) {
-//                 outside = true;
-//                 break;
-//             } else if (dist > tri.side_lens[idx] * 0.95) {
-//                 hit_edge = true;
-//             }
-//         }
+    for (int idx = 0; idx < rays.size(); idx++) {
+        raylist[RAY_P_0_OFF * rays.size() + idx] = rays[idx].a.v[0];
+        raylist[RAY_P_1_OFF * rays.size() + idx] = rays[idx].a.v[1];
+        raylist[RAY_P_2_OFF * rays.size() + idx] = rays[idx].a.v[2];
 
-//         if (outside) {
-//             continue;
-//         }
+        raylist[RAY_V_0_OFF * rays.size() + idx] = rays[idx].u.v[0];
+        raylist[RAY_V_1_OFF * rays.size() + idx] = rays[idx].u.v[1];
+        raylist[RAY_V_2_OFF * rays.size() + idx] = rays[idx].u.v[2];
+    }
 
-//         min_t = t;
-//         min_tri = &tri;
-//         min_hit_edge = hit_edge;
-//     }
+    for (int ridx = 0; ridx < rays.size(); ridx++) {
+        int roff = ridx * TRILIST_MAX * trilist_stride;
+        for (int idx = 0; idx < trilist_stride; idx++) {
+            int tri_idx = ridx * trilist_stride + idx;
+            trilist[roff + INCENTER_0_OFF * trilist_stride + idx] = alltris[tris[tri_idx]].incenter.v[0];
+            trilist[roff + INCENTER_1_OFF * trilist_stride + idx] = alltris[tris[tri_idx]].incenter.v[1];
+            trilist[roff + INCENTER_2_OFF * trilist_stride + idx] = alltris[tris[tri_idx]].incenter.v[2];
 
-//     if (min_tri != nullptr) {
-//         if (min_hit_edge) {
-//             return CudaColor {
-//                 0, 0, 0
-//             };
-//         } else {
-//             return CudaColor {
-//                 255, 0, 0
-//             };
-//         }
-//     } else {
-//         return CudaColor {
-//             128, 200, 255
-//         };
-//     }
-// }
+            trilist[roff + NORM_0_OFF * trilist_stride + idx] = alltris[tris[tri_idx]].norm.v[0];
+            trilist[roff + NORM_1_OFF * trilist_stride + idx] = alltris[tris[tri_idx]].norm.v[1];
+            trilist[roff + NORM_2_OFF * trilist_stride + idx] = alltris[tris[tri_idx]].norm.v[2];
+
+            trilist[roff + SIDE_0_0_OFF * trilist_stride + idx] = alltris[tris[tri_idx]].sides[0].v[0];
+            trilist[roff + SIDE_0_1_OFF * trilist_stride + idx] = alltris[tris[tri_idx]].sides[0].v[1];
+            trilist[roff + SIDE_0_2_OFF * trilist_stride + idx] = alltris[tris[tri_idx]].sides[0].v[2];
+
+            trilist[roff + SIDE_1_0_OFF * trilist_stride + idx] = alltris[tris[tri_idx]].sides[1].v[0];
+            trilist[roff + SIDE_1_1_OFF * trilist_stride + idx] = alltris[tris[tri_idx]].sides[1].v[1];
+            trilist[roff + SIDE_1_2_OFF * trilist_stride + idx] = alltris[tris[tri_idx]].sides[1].v[2];
+
+            trilist[roff + SIDE_2_0_OFF * trilist_stride + idx] = alltris[tris[tri_idx]].sides[2].v[0];
+            trilist[roff + SIDE_2_1_OFF * trilist_stride + idx] = alltris[tris[tri_idx]].sides[2].v[1];
+            trilist[roff + SIDE_2_2_OFF * trilist_stride + idx] = alltris[tris[tri_idx]].sides[2].v[2];
+
+            // if (idx < 4) {
+            //     printf("tri %d %d: %d (%d)\n", ridx, idx, tris[tri_idx], tri_idx);
+            // }
+            *reinterpret_cast<uint32_t*>(&trilist[roff + NUM_OFF * trilist_stride + idx]) = tris[tri_idx];
+        }
+    }
+
+    // for (int ridx = 0; ridx < 4; ridx++) {
+    //     int roff = ridx * TRILIST_MAX * trilist_stride;
+    //     for (int idx = 0; idx < 4; idx++) {
+    //         printf("Read %d %d: %u\n", ridx, idx,
+    //                *reinterpret_cast<uint32_t*>(&trilist[roff + NUM_OFF * trilist_stride + idx]));
+    //     }
+    // }
+
+    float* cuda_raylist;
+    cudaMalloc(&cuda_raylist, rays.size() * RAYLIST_MAX * sizeof(float));
+    float* cuda_trilist;
+    cudaMalloc(&cuda_trilist, rays.size() * trilist_stride * TRILIST_MAX * sizeof(float));
+
+    cudaMemcpy(cuda_raylist, raylist,
+               rays.size() * RAYLIST_MAX * sizeof(float),
+               cudaMemcpyHostToDevice);
+
+    cudaMemcpy(cuda_trilist, trilist,
+               rays.size() * trilist_stride * TRILIST_MAX * sizeof(float),
+               cudaMemcpyHostToDevice);
+
+    uint32_t* cuda_ray_hitnums;
+    cudaMalloc(&cuda_ray_hitnums, rays.size() * sizeof(uint32_t));
+
+    cuda_triangle_intersect<<<rays.size(),
+                              trilist_stride,
+                              trilist_stride * 2 * sizeof(float)>>>
+                            (cuda_raylist, cuda_trilist, cuda_ray_hitnums);
+
+    cudaMemcpy(hit_nums_out.data(), cuda_ray_hitnums,
+               rays.size() * sizeof(uint32_t),
+               cudaMemcpyDeviceToHost);
+
+    // printf("Hit nums: ");
+    // for (int i = 0; i < rays.size(); i++) {
+    //     printf("%d ", hit_nums_out[i]);
+    // }
+    // printf("\n");
+
+    cudaFree(cuda_raylist);
+    cudaFree(cuda_trilist);
+    cudaFree(cuda_ray_hitnums);
+
+    delete[] raylist;
+    delete[] trilist;
+}

@@ -11,6 +11,10 @@ use std::io::Result;
 use std::path::Path;
 use std::collections::HashMap;
 
+use sdl2;
+use sdl2::event::Event;
+use sdl2::keyboard::Keycode;
+
 #[allow(dead_code)]
 fn optimize(tris: &Vec<Triangle>, v: &Viewport, initial: (usize, usize)) {
 
@@ -90,13 +94,13 @@ fn main() -> Result<()> {
     // let width = 3840;
     // let height = 2160;
 
-    // let aspect = 1440. / 2560.;
-    // let width = 2560;
-    // let height = 1440;
+    let aspect = 1440. / 2560.;
+    let width = 2560;
+    let height = 1440;
 
-    let aspect = 480. / 640.;
-    let width = 640;
-    let height = 480;
+    // let aspect = 480. / 640.;
+    // let width = 640;
+    // let height = 480;
 
     // let aspect = 480. / 640.;
     // let width = 160;
@@ -177,8 +181,53 @@ fn main() -> Result<()> {
 
     let mut data = vec![make_vec(&[0., 0., 0.]); (width*height) as usize ];
     let progress_ctx = caster.walk_rays(&v, &s, &mut data, 12, true);
+    
+
     progress_ctx.print_stats();
     let _ = raytrace::write_png(file, (width, height), &data);
 
-    return Ok(());
+    let sdl_context = sdl2::init().unwrap();
+    let video_subsystem = sdl_context.video().unwrap();
+
+    let window = video_subsystem.window("Results", width, height)
+        .position_centered()
+        .build()
+        .unwrap();
+
+    let mut canvas = window.into_canvas().build().unwrap();
+    canvas.set_draw_color(sdl2::pixels::Color::RGB(0, 0, 0));
+    canvas.clear();
+
+    let texture_creator = canvas.texture_creator();
+    let mut texture = texture_creator.create_texture_static(sdl2::pixels::PixelFormatEnum::BGR888, width, height).unwrap();
+
+    let mut data_u8 = vec![0; (width*height*4) as usize];
+
+    for (i, item) in data.iter().enumerate() {
+        data_u8[i*4] = (item.v[0] * 255.) as u8;
+        data_u8[i*4 + 1] = (item.v[1] * 255.) as u8;
+        data_u8[i*4 + 2] = (item.v[2] * 255.) as u8;
+        data_u8[i*4 + 3] = 255;
+    }
+
+    texture.update(sdl2::rect::Rect::new(0, 0, width, height), data_u8.as_slice(), (width * 4) as usize).unwrap();
+
+    canvas.copy(&texture, None, None).unwrap();
+
+    canvas.present();
+
+    let mut event_pump = sdl_context.event_pump().unwrap();
+    'run_loop: loop {
+        for event in event_pump.poll_iter() {
+            match event {
+                Event::Quit {..} |
+                Event::KeyDown { keycode: Some(Keycode::Escape), .. } => {
+                    break 'run_loop
+                },
+                _ => {}
+            }
+        }
+    };
+
+    Ok(())
 }

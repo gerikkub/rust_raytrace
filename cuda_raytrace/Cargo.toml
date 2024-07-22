@@ -15,6 +15,8 @@ debug = true
 raytrace_lib = { path = "../raytrace_lib"}
 cxx = "1.0"
 env_logger = "0.11.1"
+sdl2 = "0.37.0"
+ordered-float = "4.2.0"
 
 [build-dependencies]
 cxx-build = "1.0"

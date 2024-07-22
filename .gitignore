@@ -1,0 +1,12 @@
+*.vscode
+*.dll
+*.lib
+target
+build
+
+perf.data
+*.nvvp
+*.ncu-rep
+
+*.lock
+*.gdb_history

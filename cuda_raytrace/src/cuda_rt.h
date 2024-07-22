@@ -1,16 +1,14 @@
 
 #pragma once
 #include "rust/cxx.h"
-// #include "cuda_raytrace/src/main.rs.h"
 
-struct CudaColor;
 struct CudaRay;
 struct CudaTriangle;
 
-void preload_triangles_cuda(rust::Vec<::CudaTriangle> const& tris);
-
-CudaColor project_ray_cuda(CudaRay const & r,
-                           rust::Vec<std::size_t> const & ctris,
-                           std::size_t maxdepth,
-                           std::size_t depth,
-                           std::array<std::uint64_t, 3> &runtimes);
+void exec_cuda_raytrace(rust::Vec<CudaTriangle> const & alltris,
+                        rust::Vec<CudaRay> const & rays,
+                        rust::Vec<uint32_t> const & tris,
+                        const uint32_t trilist_stride,
+                        const uint32_t stream_num,
+                        rust::Slice<std::uint32_t> hit_nums,
+                        std::array<std::uint64_t, 4> &runtimes);

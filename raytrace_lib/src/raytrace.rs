@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::mpsc::{channel, Sender};
 use std::collections::{HashMap, VecDeque, BTreeMap};
-use syscalls::{Sysno, syscall};
 use std::f32::consts::{PI, FRAC_PI_2};
 use std::simd::*;
 use std::simd::num::SimdFloat;
@@ -21,7 +20,7 @@ use crate::progress::ProgressStat;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Vec3 {
-    v: Simd<f32, 4>
+    pub v: Simd<f32, 4>
 }
 pub type Point = Vec3;
 pub type Color = Vec3;
@@ -334,7 +333,7 @@ pub struct Triangle {
     pub side_lens: [f32; 3],
     pub corners: [Vec3; 3],
     pub surface: SurfaceKind,
-    pub edge_thickness: f32,
+    pub edge_thickness: f32
 }
 
 pub fn make_triangle(points: &[Vec3; 3], surface: &SurfaceKind, edge_thickness: f32) -> Triangle {
@@ -595,16 +594,16 @@ pub struct LightSource {
 // }
 
 #[derive(Clone)]
-enum BBSubobj {
+pub enum BBSubobj {
     Boxes(Vec<BoundingBox>),
     Tris(Vec<usize>)
 }
 
 pub struct BoundingBox {
-    orig: Point,
-    len2: f32,
-    objs: BBSubobj,
-    depth: usize
+    pub orig: Point,
+    pub len2: f32,
+    pub objs: BBSubobj,
+    pub depth: usize
 }
 
 impl Clone for BoundingBox {
@@ -1088,28 +1087,30 @@ impl BoundingBox {
     }
 }
 
-#[derive(Debug)]
-#[repr(C)]
-struct LinuxTimespec {
-    tv_sec: i64,
-    tv_nsec: i64
-}
+// #[derive(Debug)]
+// #[repr(C)]
+// struct LinuxTimespec {
+//     tv_sec: i64,
+//     tv_nsec: i64
+// }
 
 pub fn get_thread_time() -> i64 {
 
-    let mut t = LinuxTimespec {
-        tv_sec: 0,
-        tv_nsec: 0
-    };
-    match unsafe { syscall!(Sysno::clock_gettime, 3 /*CLOCK_THREAD_CPUTIME_ID*/, &mut t as *mut LinuxTimespec) } {
-        Ok(_r) => {
-        } 
-        Err(err) => {
-            panic!("clock_gettime() failed: {}", err)
-        }
-    };
+    0
 
-    t.tv_sec * (1000*1000*1000) + t.tv_nsec
+    // let mut t = LinuxTimespec {
+    //     tv_sec: 0,
+    //     tv_nsec: 0
+    // };
+    // match unsafe { syscall!(Sysno::clock_gettime, 3 /*CLOCK_THREAD_CPUTIME_ID*/, &mut t as *mut LinuxTimespec) } {
+    //     Ok(_r) => {
+    //     } 
+    //     Err(err) => {
+    //         panic!("clock_gettime() failed: {}", err)
+    //     }
+    // };
+
+    // t.tv_sec * (1000*1000*1000) + t.tv_nsec
 }
 
 pub trait RayCaster: Send + Sync {
@@ -1291,8 +1292,8 @@ pub struct Viewport {
     vu: Vec3,
     vv: Vec3,
 
-    maxdepth: usize,
-    samples_per_pixel: usize
+    pub maxdepth: usize,
+    pub samples_per_pixel: usize
 }
 
 pub fn create_transform(dir_in: &Vec3, d_roll: f32) -> (Vec3, Vec3, Vec3) {
@@ -1349,7 +1350,7 @@ pub fn create_viewport(px: (u32, u32), size: (f32, f32), pos: &Point, dir: &Vec3
 
 impl Viewport {
 
-    fn pixel_ray(&self, px: (usize, usize)) -> Ray {
+    pub fn pixel_ray(&self, px: (usize, usize)) -> Ray {
 
         let px_x = px.0 as f32;
         let px_y = px.1 as f32;
