@@ -1,9 +1,10 @@
 
-use raytrace_lib::raytrace::{make_vec, make_color, make_disk, RayCaster,
-                             DefaultRayCaster, Scene, SurfaceKind,
-                             Triangle, Viewport};
+use raytrace_lib::debug::make_debug_ctx;
+use raytrace_lib::raytrace::{make_color, make_disk, make_dummy_triangle, make_vec, populate_triangle_numbers, DefaultRayCaster, RayCaster, Scene, SurfaceKind, Triangle, Viewport};
 use raytrace_lib::obj_parser;
 use raytrace_lib::raytrace;
+
+use cuda_raytrace_lib::cuda_raytrace;
 
 use std::time;
 use std::fs;
@@ -71,6 +72,8 @@ fn run_iteration(tris: &Vec<Triangle>, v: &Viewport, initial: (usize, usize)) ->
     let s = Scene {
         tris: tris.clone(),
         boxes: bbox,
+        debug_ctx: make_debug_ctx().into(),
+        debug_en: false
     };
 
     let caster = DefaultRayCaster {};
@@ -94,23 +97,24 @@ fn main() -> Result<()> {
     // let width = 3840;
     // let height = 2160;
 
-    let aspect = 1440. / 2560.;
-    let width = 2560;
-    let height = 1440;
+    // let aspect = 1440. / 2560.;
+    // let width = 2560;
+    // let height = 1440;
 
     // let aspect = 480. / 640.;
     // let width = 640;
     // let height = 480;
 
-    // let aspect = 480. / 640.;
-    // let width = 160;
-    // let height = 120;
+    let aspect = 64. / 64.;
+    let width = 64;
+    let height = 64;
 
     // let aspect = 1. / 1.;
     // let width = 1;
     // let height = 1;
 
     let mut obj_data: Vec<Triangle> = Vec::new();
+    obj_data.push(make_dummy_triangle());
     obj_data.extend(obj_parser::parse_obj("teapot_tri.obj",
                                          &make_vec(&[0., 0.5, 5.]),
                                          1.0,
@@ -120,15 +124,6 @@ fn main() -> Result<()> {
                                          &SurfaceKind::Matte { color: make_color((252, 119, 0)),
                                                                alpha: 0.2 },
                                          0.05));
-
-    let v = raytrace::create_viewport((width, height),
-                            (1., 1. * aspect),
-                            &make_vec(&[2., 0., 0.]),
-                            &make_vec(&[0., 0., 1.]).unit(),
-                            90.,
-                            0_f32.to_radians(),
-                            5,
-                            10);
 
     obj_data.extend(make_disk(&make_vec(&[4., 4., 7.]),
                               &make_vec(&[-0.3, -0.55, -0.5]).unit(),
@@ -154,6 +149,8 @@ fn main() -> Result<()> {
                                            alpha: 0.2 },
                               -1.));
 
+    populate_triangle_numbers(&mut obj_data);
+
     // optimize(&obj_data, &v, (10, 15));
     // return Ok(());
 
@@ -163,28 +160,71 @@ fn main() -> Result<()> {
     let bbox = raytrace::build_bounding_box(&obj_data,
                                             &make_vec(&[0., 0., 20.1]),
                                             20.,
-                                            7,
+                                            10,
                                             19);
 
+    let v = raytrace::create_viewport((width, height),
+                            (1., 1. * aspect),
+                            &make_vec(&[2., 0., 0.]),
+                            &make_vec(&[0., 0., 1.]).unit(),
+                            90.,
+                            0_f32.to_radians(),
+                            5,
+                            1);
 
-    let s = Scene {
+
+    let s_default = Scene {
         tris: obj_data,
         boxes: bbox,
+        debug_ctx: make_debug_ctx().into(),
+        debug_en: true
     };
 
-
-    let caster = DefaultRayCaster {};
+    let caster_default = DefaultRayCaster {};
+    let caster_cuda = cuda_raytrace::CudaRayCaster {};
 
     // let mut data = vec![make_vec(&[0., 0., 0.]); 1 as usize ];
     // let progress_ctx = v.walk_one_ray(&s, &mut data, (416, 130), &caster);
     // let _ = raytrace::write_png(file, (1, 1), &data);
 
     let mut data = vec![make_vec(&[0., 0., 0.]); (width*height) as usize ];
-    let progress_ctx = caster.walk_rays(&v, &s, &mut data, 12, true);
-    
+    let progress_ctx = caster_default.walk_rays(&v, &s_default, &mut data, 1, false);
+
+    let s_cuda = Scene {
+        tris: s_default.tris,
+        boxes: s_default.boxes,
+        debug_ctx: make_debug_ctx().into(),
+        debug_en: true
+    };
+
+    let progress_ctx = caster_cuda.walk_rays(&v, &s_cuda, &mut data, 1, false);
+    // return Ok(());
 
     progress_ctx.print_stats();
     let _ = raytrace::write_png(file, (width, height), &data);
+
+    if s_default.debug_en {
+        let mut debug_f = fs::File::create("debug_default.csv").unwrap();
+        let debug_ctx = s_default.debug_ctx.lock().unwrap();
+        debug_ctx.write_debug_header(&mut debug_f);
+        debug_ctx.write_all_debug_context(&mut debug_f);
+    }
+
+    if s_cuda.debug_en {
+        let mut debug_f = fs::File::create("debug_cuda.csv").unwrap();
+        let debug_ctx = s_cuda.debug_ctx.lock().unwrap();
+        debug_ctx.write_debug_header(&mut debug_f);
+        debug_ctx.write_all_debug_context(&mut debug_f);
+    }
+
+    if s_default.debug_en && s_cuda.debug_en {
+
+        let mut debug_f = fs::File::create("debug_diffs.txt").unwrap();
+        let debug_ctx_default = s_default.debug_ctx.lock().unwrap();
+        let debug_ctx_cuda = s_cuda.debug_ctx.lock().unwrap();
+
+        debug_ctx_default.compare_to(&debug_ctx_cuda, &mut debug_f);
+    }
 
     let sdl_context = sdl2::init().unwrap();
     let video_subsystem = sdl_context.video().unwrap();

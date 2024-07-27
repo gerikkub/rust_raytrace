@@ -11,4 +11,5 @@ void exec_cuda_raytrace(rust::Vec<CudaTriangle> const & alltris,
                         const uint32_t trilist_stride,
                         const uint32_t stream_num,
                         rust::Slice<std::uint32_t> hit_nums,
+                        rust::Slice<float> hit_times,
                         std::array<std::uint64_t, 4> &runtimes);

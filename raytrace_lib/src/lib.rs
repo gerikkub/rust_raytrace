@@ -6,5 +6,6 @@
 pub mod raytrace;
 pub mod progress;
 pub mod obj_parser;
+pub mod debug;
 mod bitset;
 mod bumpalloc;

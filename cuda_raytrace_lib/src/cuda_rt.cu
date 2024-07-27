@@ -1,8 +1,9 @@
 
 #include "rust/cxx.h"
-#include "cuda_raytrace/src/main.rs.h"
+#include "cuda_raytrace_lib/src/cuda_raytrace.rs.h"
 
 #include <limits>
+#include <chrono>
 
 #include <cuda_runtime.h>
 
@@ -143,7 +144,8 @@ __device__ float3 vec_scale(const float3 a, const float b) {
 
 __global__ void cuda_triangle_intersect(float* rays,
                                         float* tripointer_full,
-                                        uint32_t* ray_hitnums) {
+                                        uint32_t* ray_hitnums,
+                                        float* ray_hittimes) {
 
     extern __shared__ float thread_temp[];
     float* hit_times = thread_temp;
@@ -269,12 +271,12 @@ __global__ void cuda_triangle_intersect(float* rays,
 
     // Find minimum hit time in the thread block
     // Requires log2(1024) == 10 steps
-    for (int i = 1; i <= 10; i++) {
-        if (threadIdx.x >= (1024 >> i)) {
+    for (int i = 1; i < __ffs(blockDim.x); i++) {
+        if (threadIdx.x >= (blockDim.x >> i)) {
             return;
         }
 
-        uint32_t cmp_offset = 1024 >> i;
+        uint32_t cmp_offset = blockDim.x >> i;
         float t1 = hit_times[threadIdx.x];
         float t2 = hit_times[threadIdx.x + cmp_offset];
 
@@ -316,6 +318,7 @@ __global__ void cuda_triangle_intersect(float* rays,
         } else {
             // printf("CUDA Hit %d %d %f\n", blockIdx.x, hit_nums[0], hit_times[0]);
             ray_hitnums[blockIdx.x] = hit_nums[0];
+            ray_hittimes[blockIdx.x] = hit_times[0];
         }
     }
 }
@@ -326,13 +329,10 @@ void exec_cuda_raytrace(rust::Vec<CudaTriangle> const & alltris,
                         const uint32_t trilist_stride,
                         const uint32_t stream_num,
                         rust::Slice<std::uint32_t> hit_nums_out,
+                        rust::Slice<float> hit_times_out,
                         std::array<std::uint64_t, 4> &runtimes_out) {
 
-    // printf("CUDA Exec\n");
-    // printf(" Rays: %d\n", rays.size());
-    // printf(" Triangles: %d\n", tris.size());
-    // printf(" Triangle Stride: %d\n", trilist_stride);
-    // printf("\n");
+    auto t0 = std::chrono::high_resolution_clock::now();
 
     // Build memory layout for cuda execution
     float* raylist = new float[RAYLIST_MAX * rays.size()];
@@ -372,20 +372,11 @@ void exec_cuda_raytrace(rust::Vec<CudaTriangle> const & alltris,
             trilist[roff + SIDE_2_1_OFF * trilist_stride + idx] = alltris[tris[tri_idx]].sides[2].v[1];
             trilist[roff + SIDE_2_2_OFF * trilist_stride + idx] = alltris[tris[tri_idx]].sides[2].v[2];
 
-            // if (idx < 4) {
-            //     printf("tri %d %d: %d (%d)\n", ridx, idx, tris[tri_idx], tri_idx);
-            // }
             *reinterpret_cast<uint32_t*>(&trilist[roff + NUM_OFF * trilist_stride + idx]) = tris[tri_idx];
         }
     }
 
-    // for (int ridx = 0; ridx < 4; ridx++) {
-    //     int roff = ridx * TRILIST_MAX * trilist_stride;
-    //     for (int idx = 0; idx < 4; idx++) {
-    //         printf("Read %d %d: %u\n", ridx, idx,
-    //                *reinterpret_cast<uint32_t*>(&trilist[roff + NUM_OFF * trilist_stride + idx]));
-    //     }
-    // }
+    auto t1 = std::chrono::high_resolution_clock::now();
 
     float* cuda_raylist;
     cudaMalloc(&cuda_raylist, rays.size() * RAYLIST_MAX * sizeof(float));
@@ -403,13 +394,24 @@ void exec_cuda_raytrace(rust::Vec<CudaTriangle> const & alltris,
     uint32_t* cuda_ray_hitnums;
     cudaMalloc(&cuda_ray_hitnums, rays.size() * sizeof(uint32_t));
 
+    float* cuda_ray_hittimes;
+    cudaMalloc(&cuda_ray_hittimes, rays.size() * sizeof(float));
+
+    auto t2 = std::chrono::high_resolution_clock::now();
+
     cuda_triangle_intersect<<<rays.size(),
                               trilist_stride,
                               trilist_stride * 2 * sizeof(float)>>>
-                            (cuda_raylist, cuda_trilist, cuda_ray_hitnums);
+                            (cuda_raylist, cuda_trilist, cuda_ray_hitnums, cuda_ray_hittimes);
+
+    auto t3 = std::chrono::high_resolution_clock::now();
 
     cudaMemcpy(hit_nums_out.data(), cuda_ray_hitnums,
                rays.size() * sizeof(uint32_t),
+               cudaMemcpyDeviceToHost);
+
+    cudaMemcpy(hit_times_out.data(), cuda_ray_hittimes,
+               rays.size() * sizeof(float),
                cudaMemcpyDeviceToHost);
 
     // printf("Hit nums: ");
@@ -424,4 +426,16 @@ void exec_cuda_raytrace(rust::Vec<CudaTriangle> const & alltris,
 
     delete[] raylist;
     delete[] trilist;
+
+    auto t4 = std::chrono::high_resolution_clock::now();
+
+    uint64_t t_host_mem = std::chrono::duration_cast<std::chrono::nanoseconds>(t1-t0).count();
+    uint64_t t_host_dev_copy = std::chrono::duration_cast<std::chrono::nanoseconds>(t2-t1).count();
+    uint64_t t_cuda_exec = std::chrono::duration_cast<std::chrono::nanoseconds>(t3-t2).count();
+    uint64_t t_dev_host_copy = std::chrono::duration_cast<std::chrono::nanoseconds>(t4-t3).count();
+
+    runtimes_out[0] = t_host_mem;
+    runtimes_out[1] = t_host_dev_copy;
+    runtimes_out[2] = t_cuda_exec;
+    runtimes_out[3] = t_dev_host_copy;
 }

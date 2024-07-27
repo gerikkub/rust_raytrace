@@ -41,6 +41,19 @@ impl ProgressStat {
     }
 }
 
+impl std::ops::AddAssign for ProgressStat {
+    fn add_assign(&mut self, other: Self) {
+        match self {
+            ProgressStat::Time(t) => {
+                *t += *other.as_time();
+            },
+            ProgressStat::Count(c) => {
+                *c += other.as_count();
+            }
+        }
+    }
+}
+
 pub struct ProgressCtx {
     start_time: time::Instant,
     stop_time: time::Instant,
@@ -147,13 +160,27 @@ impl ProgressCtx {
                  (self.stop_time - self.start_time).as_millis() as f64 / 1000.,
                  (self.total_rays as f64 * 1000.) / (self.stop_time - self.start_time).as_millis() as f64 / 1_000_000.
                 );
+        let mut time_list: Vec<(String, time::Duration)> = Vec::new();
+        let mut count_list: Vec<(String, usize)> = Vec::new();
+
         for (k, v) in &self.runtimes {
             match v {
-                ProgressStat::Time(d) => println!("{}: {}.{:0>3}", k, d.as_secs(), d.subsec_millis()),
-                ProgressStat::Count(c) => println!("{}: {}", k, c)
+                ProgressStat::Time(d) => time_list.push((k.clone(), *d)),
+                ProgressStat::Count(c) => count_list.push((k.clone(), *c))
             }
         }
+        time_list.sort_by_key(|(k, _)| k.clone());
+        count_list.sort_by_key(|(k, _)| k.clone());
 
+        for (k, d) in &time_list {
+            println!("{}: {}.{:0>3}", k, d.as_secs(), d.subsec_millis());
+        }
+
+        println!("");
+
+        for (k, c) in &count_list {
+            println!("{}: {}", k, c);
+        }
     }
 
 }

@@ -1,7 +1,7 @@
 
 
 fn main() {
-    cxx_build::bridge("src/main.rs")
+    cxx_build::bridge("src/cuda_raytrace.rs")
         .cuda(true)
         .cudart("static")
         .flag("-gencode").flag("arch=compute_75,code=sm_75")
@@ -12,7 +12,7 @@ fn main() {
         .opt_level(0)
         .compile("cuda_rt");
 
-    println!("cargo:rerun-if-changed=src/main.rs");
+    println!("cargo:rerun-if-changed=src/cuda_raytrace.rs");
     println!("cargo:rerun-if-changed=src/cuda_rt.cu");
     println!("cargo:rerun-if-changed=include/cuda_rt.h");
 

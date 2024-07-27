@@ -17,6 +17,7 @@ use ordered_float::OrderedFloat;
 
 use crate::progress;
 use crate::progress::ProgressStat;
+use crate::debug;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Vec3 {
@@ -191,7 +192,6 @@ fn random_vec() -> Vec3 {
 }
 
 #[derive(Copy, Clone, Debug)]
-#[repr(C)]
 pub struct Ray {
     pub orig: Point,
     pub dir: Vec3,
@@ -324,7 +324,6 @@ pub trait Collidable {
 }
 
 #[derive(Copy, Clone, Debug)]
-#[repr(C)]
 pub struct Triangle {
     pub incenter: Point,
     pub norm: Vec3,
@@ -333,8 +332,10 @@ pub struct Triangle {
     pub side_lens: [f32; 3],
     pub corners: [Vec3; 3],
     pub surface: SurfaceKind,
-    pub edge_thickness: f32
+    pub edge_thickness: f32,
+    pub num: usize
 }
+
 
 pub fn make_triangle(points: &[Vec3; 3], surface: &SurfaceKind, edge_thickness: f32) -> Triangle {
 
@@ -376,7 +377,22 @@ pub fn make_triangle(points: &[Vec3; 3], surface: &SurfaceKind, edge_thickness: 
         side_lens: side_lens,
         corners: points.clone(),
         surface: *surface,
-        edge_thickness: edge_thickness
+        edge_thickness: edge_thickness,
+        num: 0
+    }
+}
+
+pub fn make_dummy_triangle() -> Triangle {
+    make_triangle(&[make_vec(&[1., 0., 0.]),
+                    make_vec(&[0., 1., 0.]),
+                    make_vec(&[0., 0., 1.])],
+                  &SurfaceKind::Solid { color: make_color((255, 0, 0)) },
+                  0.)
+}
+
+pub fn populate_triangle_numbers(tris: &mut Vec<Triangle>) {
+    for (idx, t) in tris.iter_mut().enumerate() {
+        t.num = idx;
     }
 }
 
@@ -772,7 +788,7 @@ pub fn build_empty_box() -> BoundingBox {
 }
 
 pub fn build_bounding_box(tris: &Vec<Triangle>, orig: &Point, len2: f32, maxdepth: usize, minobjs: usize) -> BoundingBox {
-    let refvec = (0..tris.len()).collect();
+    let refvec = (1..tris.len()).collect();
     build_bounding_box_helper(tris, &refvec, orig, len2, 0, maxdepth, minobjs).unwrap()
 }
 
@@ -830,7 +846,7 @@ fn build_bounding_box_helper(tris: &Vec<Triangle>, objs: &Vec<usize>, orig: &Poi
 
 pub fn build_trivial_bounding_box(tris: &Vec<Triangle>, orig: &Point, len2: f32) -> BoundingBox {
 
-    let allobjs = (0..tris.len()).collect();
+    let allobjs = (1..tris.len()).collect();
     BoundingBox {
         orig: *orig,
         len2: len2,
@@ -854,9 +870,6 @@ impl BoundingBox {
         let t2s = tmp1.add(&tmp2);
 
         if r.dir.v[0] != 0. {
-            // let tmp = (self.orig.v[0] - r.orig.v[0]) * r.inv_dir.v[0];
-            // let tmp2 = self.len2 * r.inv_dir.v[0];
-
             if r.inv_dir.v[0] > 0. {
                 tmin = t1s.v[0];
                 tmax = t2s.v[0];
@@ -867,9 +880,6 @@ impl BoundingBox {
         }
 
         if r.dir.v[1] != 0. {
-            // let t1 = (self.orig.v[1] - self.len2 - r.orig.v[1]) * r.inv_dir.v[1];
-            // let t2 = (self.orig.v[1] + self.len2 - r.orig.v[1]) * r.inv_dir.v[1];
-
             if r.inv_dir.v[1] > 0. {
                 tmin = f32::max(tmin, t1s.v[1]);
                 tmax = f32::min(tmax, t2s.v[1]);
@@ -880,9 +890,6 @@ impl BoundingBox {
         }
 
         if r.dir.v[2] != 0. {
-            // let t1 = (self.orig.v[2] - self.len2 - r.orig.v[2]) * r.inv_dir.v[2];
-            // let t2 = (self.orig.v[2] + self.len2 - r.orig.v[2]) * r.inv_dir.v[2];
-
             if r.inv_dir.v[2] > 0. {
                 tmin = f32::max(tmin, t1s.v[2]);
                 tmax = f32::min(tmax, t2s.v[2]);
@@ -900,13 +907,13 @@ impl BoundingBox {
     }
 
     #[inline(never)]
-    fn get_object_intersection_for_ray(&self, tris: &Vec<Triangle>, r: &Ray) -> Option<(f32, Vec3, CollisionFace, usize)> {
+    fn get_object_intersection_for_ray(&self, s: &Scene, tris: &Vec<Triangle>, r: &Ray) -> Option<(f32, Vec3, CollisionFace, usize)> {
 
         debug!("{}Bounding box: {}", " ".repeat(self.depth), self.debug_str());
         match &self.objs {
             BBSubobj::Tris(_subts) => {
                 debug!("{} Subobjects", " ".repeat(self.depth));
-                match self.get_box_min_time_intersection(tris, r) {
+                match self.get_box_min_time_intersection(s, tris, r) {
                     Some(a) => {
                         debug!("{} Min hit at {} with {}", " ".repeat(self.depth), a.0, a.3);
                         Some(a)
@@ -957,7 +964,7 @@ impl BoundingBox {
                                         // if *tmin < (bboxtmax + 0.1) {
                                         if *tmin < bboxtmax {
                                             debug!("{} Checking1 Subbox at {} {} with: {}", " ".repeat(self.depth), tmin, tmax, bbox.debug_str());
-                                            let sub = bbox.get_object_intersection_for_ray(tris, r);
+                                            let sub = bbox.get_object_intersection_for_ray(s, tris, r);
                                             match &sub {
                                                 Some(subhit) => {
                                                     if subhit.0 < acchit.0 {
@@ -978,7 +985,7 @@ impl BoundingBox {
                                     None => {
                                         if *tmin != f32::MAX {
                                             debug!("{} Checking2 Subbox at {} {} with: {}", " ".repeat(self.depth), tmin, tmax, bbox.debug_str());
-                                            let sub = bbox.get_object_intersection_for_ray(tris, r);
+                                            let sub = bbox.get_object_intersection_for_ray(s, tris, r);
                                             match &sub {
                                                 Some(subhit) => {
                                                     ((*tmin, subhit.0), sub)
@@ -1003,10 +1010,16 @@ impl BoundingBox {
     }
 
     #[inline(never)]
-    fn get_box_min_time_intersection(&self, tris: &Vec<Triangle>, r: &Ray) -> Option<(f32, Vec3, CollisionFace, usize)> {
+    fn get_box_min_time_intersection(&self, s: &Scene, tris: &Vec<Triangle>, r: &Ray) -> Option<(f32, Vec3, CollisionFace, usize)> {
 
         match &self.objs {
             BBSubobj::Tris(objtris) => {
+
+                if s.debug_en {
+                    let mut debug_ctx = s.debug_ctx.lock().unwrap();
+                    debug_ctx.update_ray_triangles(r, objtris);
+                }
+
                 objtris.iter().fold(None,
                     |acc, tnum| {
                         match tris[*tnum].intersects(r) {
@@ -1088,7 +1101,6 @@ impl BoundingBox {
 }
 
 // #[derive(Debug)]
-// #[repr(C)]
 // struct LinuxTimespec {
 //     tv_sec: i64,
 //     tv_nsec: i64
@@ -1251,9 +1263,13 @@ fn project_ray(r: &Ray, s: &Scene, depth: usize,
     }
     let blue = make_color((128, 180, 255));
 
-    let t1 = get_thread_time();
-    let hit = s.boxes.get_object_intersection_for_ray(&s.tris, &r);
+    if s.debug_en {
+        let mut debug_ctx = s.debug_ctx.lock().unwrap();
+        debug_ctx.add_ray(r);
+    }
 
+    let t1 = get_thread_time();
+    let hit = s.boxes.get_object_intersection_for_ray(s, &s.tris, &r);
     let t2 = get_thread_time();
 
     *runstats.entry("BoundingBox".to_string()).or_insert(ProgressStat::Time(time::Duration::from_nanos(0))).as_time_mut() += time::Duration::from_nanos((t2-t1) as u64);
@@ -1266,22 +1282,27 @@ fn project_ray(r: &Ray, s: &Scene, depth: usize,
 
     match hit {
         None => blue,
-        Some((_t, point, face, objidx)) => {
+        Some((t, point, face, objidx)) => {
+        if s.debug_en {
+            let mut debug_ctx = s.debug_ctx.lock().unwrap();
+            debug_ctx.update_ray_hit(r, objidx, t);
+        }
+
             color_ray(r, s, objidx, &point, &face, depth, runstats)
         }
     }
 
 }
 
-#[repr(C)]
 pub struct Scene {
     pub tris: Vec<Triangle>,
     pub boxes: BoundingBox,
     // pub lights: Option<LightSource>
+    pub debug_ctx: Mutex<debug::DebugCtx>,
+    pub debug_en: bool
 }
 
 #[derive(Clone, Copy,Debug)]
-#[repr(C)]
 pub struct Viewport {
     pub width: usize,
     pub height: usize,
@@ -1392,7 +1413,12 @@ impl Viewport {
             for y in 0..self.width {
                 let mut acc = make_vec(&[0., 0., 0.]);
                 for _i in 0..self.samples_per_pixel {
-                    let ray_color = project_ray(&self.pixel_ray((row,y)), s, self.maxdepth, &mut runstats);
+                    let ray = self.pixel_ray((row, y));
+                    if s.debug_en {
+                        let mut debug_ctx = s.debug_ctx.lock().unwrap();
+                        debug_ctx.register_ray(&ray, (row, y));
+                    }
+                    let ray_color = project_ray(&ray, s, self.maxdepth, &mut runstats);
                     acc = acc.add(&ray_color);
 
                     rays_count += 1;
